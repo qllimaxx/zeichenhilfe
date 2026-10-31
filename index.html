@@ -18,6 +18,15 @@
                     Wake Lock (Bildschirm bleibt an) solange die Kamera läuft. Vollbild-Knopf.
                     Bedienleiste mit Symbol-Knöpfen. Ansicht-Zustand jetzt als Bildmitte relativ
                     zur Papier-Ebene + Zoomfaktor gespeichert (noch nichts dauerhaft gespeichert).
+  0.3 (2026-11-01)  Installierbar und offline: Manifest (manifest.webmanifest), Service Worker (sw.js),
+                    eigene App-Symbole (icon-192/512/maskable-512.png), Knopf "App installieren"
+                    (im Info-Fenster, nur wenn der Browser es anbietet). Knopf "Drehung" sperrt die
+                    aktuelle Bildschirmausrichtung (bei Bedarf mit Vollbild). Info: installierte App,
+                    Offline-Speicher, Drehsperre.
+
+  VERSIONSNUMMER: wird NUR hier in APP_VERSION gepflegt. sw.js erhält sie über die Adresse
+  (./sw.js?v=APP_VERSION) und benennt damit seinen Cache. Zusätzliche Dateien neben index.html:
+  manifest.webmanifest, sw.js, icon-192.png, icon-512.png, icon-maskable-512.png
 
   Ebenen-Aufbau (von außen nach innen)
   ------------------------------------
@@ -35,6 +44,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="author" content="Benjamin Dormoros">
 <meta name="theme-color" content="#000000">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
+<link rel="apple-touch-icon" href="./icon-192.png">
 <title>Zeichenhilfe</title>
 <style>
   :root{
@@ -89,7 +101,7 @@
   /* ---------- Bedienleiste (Hochformat: unten) ---------- */
   #bar{
     position:absolute; left:0; right:0; bottom:0; z-index:10;
-    display:grid; grid-template-columns:repeat(6, 1fr); gap:6px; align-items:center;
+    display:grid; grid-template-columns:repeat(7, 1fr); gap:5px; align-items:center;
     padding:8px calc(8px + var(--sr)) calc(8px + var(--sb)) calc(8px + var(--sl));
     background:var(--bar-bg); -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
     touch-action:manipulation;
@@ -111,6 +123,12 @@
              stroke-linecap:round; stroke-linejoin:round; }
   .ibtn.on{ box-shadow: inset 0 0 0 2px var(--accent); }
   .ibtn.locked{ background:var(--err); }
+  .ibtn.fixed{ background:var(--accent); color:#00213f; font-weight:700; }
+  #infoBtn{ position:relative; }
+  #infoBtn.dot::after{ content:""; position:absolute; top:5px; right:8px; width:9px; height:9px;
+                       border-radius:50%; background:var(--accent); }
+  #installBtn{ width:100%; margin-top:12px; background:var(--accent); color:#00213f; font-weight:700; display:none; }
+  #installBtn.show{ display:block; }
   .seg{ display:flex; border-radius:12px; overflow:hidden; background:var(--btn); }
   .seg .btn{ flex:1; border-radius:0; background:transparent; font-weight:500; }
   .seg .btn.active{ background:var(--accent); color:#00213f; font-weight:700; }
@@ -219,6 +237,10 @@
     <svg viewBox="0 0 24 24"><path id="fsPath" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     <span id="fsLbl">Vollbild</span>
   </button>
+  <button id="orientBtn" class="btn ibtn" title="Drehung sperren" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="18" rx="2"/><path d="M3.5 9a9 9 0 0 1 2.5-3.5M20.5 15a9 9 0 0 1-2.5 3.5"/></svg>
+    <span id="orientLbl">Drehung</span>
+  </button>
   <button id="infoBtn" class="btn ibtn" title="Info">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
     <span>Info</span>
@@ -236,13 +258,14 @@
 <div id="info" role="dialog" aria-label="Info">
   <h2>Info und Diagnose</h2>
   <table><tbody id="infoBody"></tbody></table>
+  <button id="installBtn" class="btn">App installieren</button>
   <button id="infoClose" class="btn">Schließen</button>
 </div>
 
 <script>
 'use strict';
 /* ================= Version und Einstellungen ================= */
-const APP_VERSION = '0.2';
+const APP_VERSION = '0.3';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
 const SETTINGS_FORMAT = 1;          // Format des Einstellungsobjekts; nur abwärtskompatibel ändern
 const STORAGE_KEY = 'zeichenhilfe.settings';
 
@@ -736,6 +759,9 @@ async function renderInfo(){
     ['Wake Lock verfügbar', yn('wakeLock' in navigator)],
     ['Bildschirm bleibt an', wl],
     ['Vollbild', fs],
+    ['Drehung gesperrt', !orientSupported ? '<span class="nein">nicht unterstützt</span>' : (orientLocked ? 'ja' : 'nein')],
+    ['Läuft als installierte App', yn(isInstalledApp())],
+    ['Offline-Speicher (Service Worker)', swActive() ? '<span class="ja">aktiv</span>' : '<span class="nein">nicht aktiv</span>'],
     ['Bildschirm', esc(innerWidth + ' × ' + innerHeight + ' (Pixeldichte ' + (window.devicePixelRatio || 1) + ')')]
   ];
   infoBody.innerHTML = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
@@ -747,7 +773,97 @@ $('infoClose').addEventListener('click', () => info.classList.remove('show'));
 document.addEventListener('gesturestart', e => e.preventDefault());
 document.addEventListener('dblclick', e => e.preventDefault());
 
+/* ================= Installierte App? ================= */
+function isInstalledApp(){
+  try {
+    if (matchMedia('(display-mode: standalone)').matches) return true;
+    // "fullscreen" zählt nur, wenn es nicht das normale Vollbild des Browsers (Knopf) ist
+    if (matchMedia('(display-mode: fullscreen)').matches && !document.fullscreenElement) return true;
+  } catch(e){}
+  return false;
+}
+
+/* ================= Drehung sperren ================= */
+const orientBtn = $('orientBtn');
+const orientSupported = !!(screen.orientation && typeof screen.orientation.lock === 'function');
+let orientLocked = false;
+function applyOrientUi(){
+  orientBtn.classList.toggle('fixed', orientLocked);
+  orientBtn.setAttribute('aria-pressed', orientLocked);
+  $('orientLbl').textContent = orientLocked ? 'Fixiert' : 'Drehung';
+  orientBtn.title = orientLocked ? 'Drehung freigeben' : 'Drehung sperren';
+}
+orientBtn.addEventListener('click', async () => {
+  if (orientLocked){
+    try { screen.orientation.unlock(); } catch(e){}
+    orientLocked = false; applyOrientUi();
+    return;
+  }
+  if (!orientSupported){
+    showMsg('Drehung sperren wird von diesem Browser nicht unterstützt. Tipp: Automatisches Drehen in den Android-Schnelleinstellungen ausschalten.', false);
+    return;
+  }
+  const type = screen.orientation.type;   // aktuelle Ausrichtung, z. B. "portrait-primary"
+  try {
+    await screen.orientation.lock(type);
+  } catch(e1){
+    // Meist nur im Vollbild erlaubt: Vollbild anfordern und erneut versuchen
+    try {
+      if (!isFs() && !isInstalledApp() && fsSupported) await fsEl.requestFullscreen({ navigationUI: 'hide' });
+      await screen.orientation.lock(type);
+    } catch(e2){
+      showMsg('Drehung sperren ist hier nicht möglich. Tipp: Automatisches Drehen in den Android-Schnelleinstellungen ausschalten.', false);
+      return;
+    }
+  }
+  orientLocked = true; applyOrientUi();
+});
+// Verlässt man das Vollbild, gibt der Browser die Sperre selbst frei
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && orientLocked && !isInstalledApp()){
+    try { screen.orientation.unlock(); } catch(e){}
+    orientLocked = false; applyOrientUi();
+  }
+});
+
+/* ================= App installieren ================= */
+let installEvent = null;
+const installBtn = $('installBtn');
+function applyInstallUi(){
+  installBtn.classList.toggle('show', !!installEvent);
+  infoBtn.classList.toggle('dot', !!installEvent);   // Punkt am Info-Knopf: Installation möglich
+}
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();          // eigenen Knopf zeigen statt Browser-Leiste
+  installEvent = e;
+  applyInstallUi();
+});
+installBtn.addEventListener('click', async () => {
+  if (!installEvent) return;
+  const ev = installEvent;
+  try { await ev.prompt(); await ev.userChoice; } catch(e){}
+  installEvent = null; applyInstallUi();
+});
+window.addEventListener('appinstalled', () => {
+  installEvent = null; applyInstallUi();
+  showMsg('App installiert. Du findest „Zeichenhilfe“ jetzt bei deinen Apps.', false);
+});
+
+/* ================= Service Worker (offline) ================= */
+const swActive = () => !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+if ('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js?v=' + encodeURIComponent(APP_VERSION), { scope: './' })
+      .catch(() => { /* App läuft auch ohne Service Worker */ });
+  });
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (info.classList.contains('show')) renderInfo();
+  });
+}
+
 /* ================= Start ================= */
+applyOrientUi();
+applyInstallUi();
 setOpacity(settings.photo.opacity * 100);
 applyBar();
 applyUi();

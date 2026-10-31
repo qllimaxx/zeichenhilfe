@@ -2,7 +2,7 @@
 <!--
   Zeichenhilfe – Overlay und Perspektive
   Autor: Benjamin Dormoros
-  Version: 0.1
+  Version: 0.2
 
   Änderungsverlauf
   ----------------
@@ -11,14 +11,21 @@
                     Hoch-/Querformat, ein-/ausblendbare Bedienleiste, Info-/Diagnose-Bereich,
                     Ebenen-Struktur für spätere Foto- und Ansicht-Transformation,
                     zentrales Einstellungsobjekt (noch ohne Speichern).
+  0.2 (2026-10-31)  Gesten in zwei Modi: "Ausrichten" (1 Finger verschieben, 2 Finger zoomen/drehen
+                    nur das Foto, Einrasten bei 0/90/180/270° ±3°, Foto zurücksetzen) und
+                    "Zeichnen" (Ansicht 1×–5× zoomen und verschieben, Rand-Begrenzung,
+                    Doppeltippen = 1×, Zoom-Anzeige). Sperre für alle Bild-Gesten.
+                    Wake Lock (Bildschirm bleibt an) solange die Kamera läuft. Vollbild-Knopf.
+                    Bedienleiste mit Symbol-Knöpfen. Ansicht-Zustand jetzt als Bildmitte relativ
+                    zur Papier-Ebene + Zoomfaktor gespeichert (noch nichts dauerhaft gespeichert).
 
   Ebenen-Aufbau (von außen nach innen)
   ------------------------------------
-  #stage        Bildschirmfläche, schneidet ab
-   └ #view      ANSICHT-Transformation (später: Zoomen/Verschieben von allem gemeinsam)
+  #stage        Bildschirmfläche, schneidet ab, empfängt die Gesten
+   └ #view      ANSICHT-Transformation (Zoomen/Verschieben von allem gemeinsam)
       └ #paper  "Papier-Ebene", hat exakt das Seitenverhältnis des Kamerabilds
          ├ #cam         Kamerabild
-         ├ #photoLayer  FOTO-Transformation (später: nur das Foto verschieben/zoomen/drehen)
+         ├ #photoLayer  FOTO-Transformation (nur das Foto verschieben/zoomen/drehen)
          │   └ #photo
          └ #guides      Platz für Hilfslinien (Raster, Horizont, Fluchtpunkte)
 -->
@@ -54,10 +61,15 @@
 
   /* ---------- Ebenen ---------- */
   #stage{ position:absolute; inset:0; overflow:hidden; touch-action:none; background:#000; }
-  #view{ position:absolute; inset:0; transform-origin:50% 50%; will-change:transform; }
+  #stage.locked::after{ content:""; position:absolute; inset:0; pointer-events:none;
+                        box-shadow: inset 0 0 0 3px var(--err); }
+  /* Ursprung oben links: Bildschirm = Verschiebung + Zoom × Position */
+  #view{ position:absolute; inset:0; transform-origin:0 0; }
+  /* will-change nur während einer Geste, danach wird wieder scharf gerendert */
+  #view.moving, #photoLayer.moving{ will-change:transform; }
   #paper{ position:absolute; left:0; top:0; overflow:hidden; background:#151515; }
   #cam{ position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:none; }
-  #photoLayer{ position:absolute; inset:0; transform-origin:50% 50%; pointer-events:none; will-change:transform; }
+  #photoLayer{ position:absolute; inset:0; transform-origin:50% 50%; pointer-events:none; }
   #photo{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
           max-width:none; max-height:none; display:none; opacity:.5; }
   #guides{ position:absolute; inset:0; pointer-events:none; }
@@ -66,24 +78,43 @@
          padding:24px; text-align:center; color:var(--muted); font-size:16px; line-height:1.5;
          pointer-events:none; }
 
+  /* ---------- Status oben (Modus, Sperre, Zoom) ---------- */
+  #top{ position:absolute; z-index:9; top:calc(8px + var(--st)); left:50%; transform:translateX(-50%);
+        display:flex; gap:6px; pointer-events:none; }
+  .chip{ font-size:13px; padding:4px 9px; border-radius:999px; background:rgba(0,0,0,.55);
+         white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .chip.lock{ background:var(--err); color:#fff; font-weight:600; }
+  .chip.hide{ display:none; }
+
   /* ---------- Bedienleiste (Hochformat: unten) ---------- */
   #bar{
     position:absolute; left:0; right:0; bottom:0; z-index:10;
-    display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:center;
+    display:grid; grid-template-columns:repeat(6, 1fr); gap:6px; align-items:center;
     padding:8px calc(8px + var(--sr)) calc(8px + var(--sb)) calc(8px + var(--sl));
     background:var(--bar-bg); -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
     touch-action:manipulation;
   }
   #bar.hidden{ display:none; }
+  #bar > .seg, #bar > .opacity{ grid-column:1 / -1; }
   .btn{
     min-height:44px; min-width:44px; padding:0 14px; border:0; border-radius:12px;
     background:var(--btn); color:var(--fg); font:inherit; font-size:15px; cursor:pointer;
     touch-action:manipulation;
   }
   .btn:active{ background:var(--btn-press); }
-  .btn.on{ box-shadow: inset 0 0 0 2px var(--accent); }
-  .opacity{ display:flex; align-items:center; gap:8px; min-height:44px; padding:0 6px;
-            flex:1 1 220px; max-width:420px; }
+  .btn:disabled{ opacity:.35; }
+  .ibtn{
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+    min-height:50px; min-width:44px; padding:4px 2px; font-size:11px; line-height:1.1;
+  }
+  .ibtn svg{ width:22px; height:22px; fill:none; stroke:currentColor; stroke-width:2;
+             stroke-linecap:round; stroke-linejoin:round; }
+  .ibtn.on{ box-shadow: inset 0 0 0 2px var(--accent); }
+  .ibtn.locked{ background:var(--err); }
+  .seg{ display:flex; border-radius:12px; overflow:hidden; background:var(--btn); }
+  .seg .btn{ flex:1; border-radius:0; background:transparent; font-weight:500; }
+  .seg .btn.active{ background:var(--accent); color:#00213f; font-weight:700; }
+  .opacity{ display:flex; align-items:center; gap:8px; min-height:44px; padding:0 6px; }
   .opacity label{ font-size:14px; color:var(--muted); white-space:nowrap; }
   .opacity input[type=range]{ flex:1; min-width:90px; height:44px; accent-color:var(--accent); touch-action:pan-x; }
   #opVal{ min-width:44px; text-align:right; font-variant-numeric:tabular-nums; font-size:15px; }
@@ -103,13 +134,13 @@
   /* ---------- Querformat: Leiste rechts ---------- */
   @media (orientation: landscape){
     #bar{
-      top:0; bottom:0; left:auto; right:0; width:calc(156px + var(--sr));
-      flex-direction:column; flex-wrap:nowrap; justify-content:center;
+      top:0; bottom:0; left:auto; right:0; width:calc(160px + var(--sr));
+      grid-template-columns:repeat(2, 1fr); align-content:center; gap:6px;
       padding:calc(8px + var(--st)) calc(8px + var(--sr)) calc(8px + var(--sb)) 8px;
       overflow-y:auto;
     }
-    #bar .btn{ width:100%; }
-    .opacity{ flex:0 0 auto; flex-wrap:wrap; width:100%; padding:0; gap:2px 6px; }
+    .seg .btn{ padding:0 4px; font-size:13px; }
+    .opacity{ flex-wrap:wrap; padding:0; gap:0 6px; }
     .opacity label{ flex:1; }
     .opacity input[type=range]{ flex:1 1 100%; order:3; }
     #barToggle{ right:auto; left:calc(8px + var(--sl)); }
@@ -155,18 +186,48 @@
   <div id="hint">Tippe auf „Kamera starten“ und „Foto wählen“.</div>
 </div>
 
-<div id="ver">v0.1</div>
-<button id="barToggle" class="btn" aria-label="Leiste aus-/einblenden" title="Leiste aus-/einblenden">☰</button>
+<div id="ver">v0.2</div>
+<div id="top">
+  <span id="chipMode" class="chip">Ausrichten</span>
+  <span id="chipLock" class="chip lock hide">Gesperrt</span>
+  <span id="chipZoom" class="chip hide">1×</span>
+</div>
+<button id="barToggle" class="btn" aria-label="Leiste aus-/einblenden" title="Leiste aus-/einblenden">✕</button>
 
 <div id="bar">
-  <button id="camBtn" class="btn">Kamera starten</button>
-  <button id="photoBtn" class="btn">Foto wählen</button>
+  <div class="seg" role="group" aria-label="Modus">
+    <button id="modeAlign" class="btn active" aria-pressed="true">Ausrichten</button>
+    <button id="modeDraw" class="btn" aria-pressed="false">Zeichnen</button>
+  </div>
+  <button id="camBtn" class="btn ibtn" title="Kamera starten">
+    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+    <span id="camLbl">Kamera</span>
+  </button>
+  <button id="photoBtn" class="btn ibtn" title="Foto wählen">
+    <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M4 18l5-5 4 4 3-3 4 4"/></svg>
+    <span>Foto</span>
+  </button>
+  <button id="resetBtn" class="btn ibtn" title="Foto zurücksetzen">
+    <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.5-5.8"/><path d="M4 4v4h4"/></svg>
+    <span>Zurücks.</span>
+  </button>
+  <button id="lockBtn" class="btn ibtn" title="Gesten sperren" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path id="lockPath" d="M8 11V8a4 4 0 0 1 7.5-2"/></svg>
+    <span id="lockLbl">Sperre</span>
+  </button>
+  <button id="fsBtn" class="btn ibtn" title="Vollbild">
+    <svg viewBox="0 0 24 24"><path id="fsPath" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+    <span id="fsLbl">Vollbild</span>
+  </button>
+  <button id="infoBtn" class="btn ibtn" title="Info">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+    <span>Info</span>
+  </button>
   <div class="opacity">
     <label for="opacity">Deckkraft</label>
     <input id="opacity" type="range" min="0" max="100" step="1" value="50">
     <span id="opVal">50 %</span>
   </div>
-  <button id="infoBtn" class="btn">Info</button>
 </div>
 <input id="file" type="file" accept="image/*">
 
@@ -181,21 +242,26 @@
 <script>
 'use strict';
 /* ================= Version und Einstellungen ================= */
-const APP_VERSION = '0.1';
+const APP_VERSION = '0.2';
 const SETTINGS_FORMAT = 1;          // Format des Einstellungsobjekts; nur abwärtskompatibel ändern
 const STORAGE_KEY = 'zeichenhilfe.settings';
 
-// Zentrales Einstellungsobjekt. Positionen relativ zur Papier-Ebene (Anteil von Breite/Höhe),
-// damit sie bei Drehung und anderer Auflösung gültig bleiben.
+// Zentrales Einstellungsobjekt. Alles relativ zur Papier-Ebene, damit Drehen und Vollbild nichts verschieben.
 const settings = {
   formatVersion: SETTINGS_FORMAT,
   appVersion: APP_VERSION,
-  photo: { opacity: 0.5, x: 0, y: 0, scale: 1, rotation: 0 },   // Foto-Transformation
-  view:  { x: 0, y: 0, scale: 1 },                               // Ansicht-Transformation
-  ui:    { barVisible: true }
+  // Foto: x/y = Verschiebung der Fotomitte als Anteil von Papierbreite/-höhe,
+  // scale = Faktor zur "passt ganz hinein"-Größe, rotation in Grad
+  photo: { opacity: 0.5, x: 0, y: 0, scale: 1, rotation: 0 },
+  // Ansicht: cx/cy = Papierpunkt (Anteil 0..1) in der Bildschirmmitte, scale = Zoom 1..5
+  view:  { cx: 0.5, cy: 0.5, scale: 1 },
+  ui:    { barVisible: true, mode: 'align', locked: false }
 };
+const VIEW_MIN = 1, VIEW_MAX = 5;
+const PHOTO_MIN = 0.05, PHOTO_MAX = 20;
+const SNAP_DEG = 3;
 
-// Speicher-Helfer – in Version 0.1 noch NICHT aufgerufen.
+// Speicher-Helfer – noch NICHT aufgerufen (kommt im nächsten Schritt).
 function loadSettings(){
   try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : null; }
   catch(e){ return null; }
@@ -211,13 +277,19 @@ const stage = $('stage'), view = $('view'), paper = $('paper'), cam = $('cam');
 const photoLayer = $('photoLayer'), photo = $('photo'), hint = $('hint');
 const bar = $('bar'), camBtn = $('camBtn'), photoBtn = $('photoBtn'), fileIn = $('file');
 const opacity = $('opacity'), opVal = $('opVal'), infoBtn = $('infoBtn');
+const resetBtn = $('resetBtn'), lockBtn = $('lockBtn'), fsBtn = $('fsBtn');
+const modeAlign = $('modeAlign'), modeDraw = $('modeDraw');
+const chipMode = $('chipMode'), chipLock = $('chipLock'), chipZoom = $('chipZoom');
 const msg = $('msg'), msgText = $('msgText'), info = $('info'), infoBody = $('infoBody');
 $('ver').textContent = 'v' + APP_VERSION;
 
 let stream = null;
 let camWasRunning = false;
 let photoUrl = null;
-let paperSize = { w: 0, h: 0 };
+// Papier-Geometrie in Stage-Pixeln (ohne Ansicht-Zoom)
+let P = { w: 0, h: 0, left: 0, top: 0 };
+// Aktuelle Ansicht in Pixeln: Bildschirm = (tx,ty) + s × Stage-Position
+let V = { s: 1, tx: 0, ty: 0 };
 
 /* ================= Meldungen ================= */
 function showMsg(text, isError){
@@ -235,20 +307,20 @@ function layout(){
   if (stream && cam.videoWidth && cam.videoHeight){ aw = cam.videoWidth; ah = cam.videoHeight; }
   const s = Math.min(sw / aw, sh / ah);
   const pw = Math.round(aw * s), ph = Math.round(ah * s);
+  P = { w: pw, h: ph, left: Math.round((sw - pw) / 2), top: Math.round((sh - ph) / 2) };
   paper.style.width = pw + 'px';
   paper.style.height = ph + 'px';
-  paper.style.left = Math.round((sw - pw) / 2) + 'px';
-  paper.style.top = Math.round((sh - ph) / 2) + 'px';
-  paperSize = { w: pw, h: ph };
+  paper.style.left = P.left + 'px';
+  paper.style.top = P.top + 'px';
   fitPhoto();
   applyPhotoTransform();
   applyViewTransform();
 }
 
-// Foto so groß wie möglich, ganz sichtbar, mittig in der Papier-Ebene
+// Grundgröße: Foto so groß wie möglich, ganz sichtbar, mittig in der Papier-Ebene
 function fitPhoto(){
   if (!photo.naturalWidth) return;
-  const s = Math.min(paperSize.w / photo.naturalWidth, paperSize.h / photo.naturalHeight);
+  const s = Math.min(P.w / photo.naturalWidth, P.h / photo.naturalHeight);
   photo.style.width = (photo.naturalWidth * s) + 'px';
   photo.style.height = (photo.naturalHeight * s) + 'px';
 }
@@ -257,15 +329,45 @@ function fitPhoto(){
 function applyPhotoTransform(){
   const p = settings.photo;
   photoLayer.style.transform =
-    `translate(${p.x * paperSize.w}px, ${p.y * paperSize.h}px) rotate(${p.rotation}deg) scale(${p.scale})`;
+    `translate(${p.x * P.w}px, ${p.y * P.h}px) rotate(${p.rotation}deg) scale(${p.scale})`;
   photo.style.opacity = p.opacity;
+}
+
+// Ansicht begrenzen: Papier darf nicht vom Rand weggeschoben werden; ist es kleiner als der
+// Bildschirm, bleibt es in dieser Richtung mittig.
+function clampView(v){
+  const sw = stage.clientWidth, sh = stage.clientHeight;
+  v.s = Math.min(VIEW_MAX, Math.max(VIEW_MIN, v.s));
+  const W = v.s * P.w, H = v.s * P.h;
+  let L = v.tx + v.s * P.left, T = v.ty + v.s * P.top;
+  L = (W >= sw) ? Math.min(0, Math.max(sw - W, L)) : (sw - W) / 2;
+  T = (H >= sh) ? Math.min(0, Math.max(sh - H, T)) : (sh - H) / 2;
+  v.tx = L - v.s * P.left;
+  v.ty = T - v.s * P.top;
+  return v;
+}
+// settings.view (relativ) -> Pixel
+function viewFromSettings(){
+  const sw = stage.clientWidth, sh = stage.clientHeight, v = settings.view;
+  const s = v.scale;
+  return clampView({ s, tx: sw / 2 - s * (P.left + v.cx * P.w), ty: sh / 2 - s * (P.top + v.cy * P.h) });
+}
+// Pixel -> settings.view (relativ)
+function storeView(v){
+  const sw = stage.clientWidth, sh = stage.clientHeight;
+  settings.view.scale = v.s;
+  settings.view.cx = P.w ? ((sw / 2 - v.tx) / v.s - P.left) / P.w : 0.5;
+  settings.view.cy = P.h ? ((sh / 2 - v.ty) / v.s - P.top) / P.h : 0.5;
 }
 
 // b) Ansicht-Transformation – wirkt auf Kamerabild + Foto + Hilfslinien gemeinsam
 function applyViewTransform(){
-  const v = settings.view;
-  view.style.transform =
-    `translate(${v.x * stage.clientWidth}px, ${v.y * stage.clientHeight}px) scale(${v.scale})`;
+  V = viewFromSettings();
+  storeView(V);   // nach Begrenzung zurückschreiben
+  view.style.transform = `translate(${V.tx}px, ${V.ty}px) scale(${V.s})`;
+  const z = V.s;
+  chipZoom.textContent = z.toFixed(1).replace('.', ',') + '×';
+  chipZoom.classList.toggle('hide', z <= 1.001);
 }
 
 function updateHint(){
@@ -282,6 +384,208 @@ window.addEventListener('resize', scheduleLayout);
 window.addEventListener('orientationchange', scheduleLayout);
 cam.addEventListener('loadedmetadata', scheduleLayout);
 cam.addEventListener('resize', scheduleLayout);   // Kamerabild ändert Maße (z. B. beim Drehen)
+
+/* ================= Gesten ================= */
+const pointers = new Map();   // id -> {x,y} aktuelle Bildschirmposition (Stage-lokal)
+let gesture = null;           // {rawRot} während einer Geste
+let tapInfo = null, lastTap = null;
+
+function stagePoint(e){
+  const r = stage.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+// Bildschirm (Stage-lokal) -> Papier-Koordinaten (Pixel der Papier-Ebene ohne Zoom)
+function toPaper(pt){
+  return { x: (pt.x - V.tx) / V.s - P.left, y: (pt.y - V.ty) / V.s - P.top };
+}
+function snapRot(deg){
+  const n = Math.round(deg / 90) * 90;
+  return Math.abs(deg - n) <= SNAP_DEG ? n : deg;
+}
+
+function gesturesBlocked(){
+  if (settings.ui.locked) return true;
+  if (settings.ui.mode === 'align' && !photo.naturalWidth) return true;   // ohne Foto nichts auszurichten
+  return false;
+}
+
+function startGestureIfNeeded(){
+  if (!gesture){
+    gesture = { rawRot: settings.photo.rotation };
+    view.classList.add('moving'); photoLayer.classList.add('moving');
+  }
+}
+function endGesture(){
+  gesture = null;
+  view.classList.remove('moving'); photoLayer.classList.remove('moving');
+}
+
+// Wendet die Bewegung von "prev" nach "cur" an (je Map id->{x,y}), nur Finger die in beiden vorkommen
+function applyMove(prev, cur){
+  const ids = [...cur.keys()].filter(id => prev.has(id)).slice(0, 2);
+  if (!ids.length) return;
+  if (settings.ui.mode === 'align') moveAlign(ids, prev, cur);
+  else moveDraw(ids, prev, cur);
+}
+
+function moveAlign(ids, prev, cur){
+  const p = settings.photo;
+  let pc = { x: P.w / 2 + p.x * P.w, y: P.h / 2 + p.y * P.h };   // Fotomitte in Papier-Pixeln
+  if (ids.length === 1){
+    const a0 = toPaper(prev.get(ids[0])), a1 = toPaper(cur.get(ids[0]));
+    pc.x += a1.x - a0.x; pc.y += a1.y - a0.y;
+  } else {
+    const a0 = toPaper(prev.get(ids[0])), b0 = toPaper(prev.get(ids[1]));
+    const a1 = toPaper(cur.get(ids[0])),  b1 = toPaper(cur.get(ids[1]));
+    const d0x = b0.x - a0.x, d0y = b0.y - a0.y, d1x = b1.x - a1.x, d1y = b1.y - a1.y;
+    const l0 = Math.hypot(d0x, d0y), l1 = Math.hypot(d1x, d1y);
+    if (l0 < 1 || l1 < 1) return;
+    let ds = l1 / l0;
+    const newScale = Math.min(PHOTO_MAX, Math.max(PHOTO_MIN, p.scale * ds));
+    ds = newScale / p.scale;
+    let dth = Math.atan2(d1y, d1x) - Math.atan2(d0y, d0x);
+    if (dth > Math.PI) dth -= 2 * Math.PI;          // Sprung über ±180° vermeiden
+    else if (dth < -Math.PI) dth += 2 * Math.PI;
+    const m0 = { x: (a0.x + b0.x) / 2, y: (a0.y + b0.y) / 2 };
+    const m1 = { x: (a1.x + b1.x) / 2, y: (a1.y + b1.y) / 2 };
+    const rx = pc.x - m0.x, ry = pc.y - m0.y, c = Math.cos(dth), s = Math.sin(dth);
+    pc = { x: m1.x + ds * (c * rx - s * ry), y: m1.y + ds * (s * rx + c * ry) };
+    p.scale = newScale;
+    gesture.rawRot += dth * 180 / Math.PI;
+    p.rotation = snapRot(gesture.rawRot);
+  }
+  p.x = (pc.x - P.w / 2) / P.w;
+  p.y = (pc.y - P.h / 2) / P.h;
+  applyPhotoTransform();
+}
+
+function moveDraw(ids, prev, cur){
+  const v = { s: V.s, tx: V.tx, ty: V.ty };
+  if (ids.length === 1){
+    if (v.s <= 1.0001) return;                    // ungezoomt: nichts zu verschieben
+    const a0 = prev.get(ids[0]), a1 = cur.get(ids[0]);
+    v.tx += a1.x - a0.x; v.ty += a1.y - a0.y;
+  } else {
+    const a0 = prev.get(ids[0]), b0 = prev.get(ids[1]);
+    const a1 = cur.get(ids[0]),  b1 = cur.get(ids[1]);
+    const l0 = Math.hypot(b0.x - a0.x, b0.y - a0.y), l1 = Math.hypot(b1.x - a1.x, b1.y - a1.y);
+    if (l0 < 1 || l1 < 1) return;
+    const m0 = { x: (a0.x + b0.x) / 2, y: (a0.y + b0.y) / 2 };
+    const m1 = { x: (a1.x + b1.x) / 2, y: (a1.y + b1.y) / 2 };
+    const sNew = Math.min(VIEW_MAX, Math.max(VIEW_MIN, v.s * l1 / l0));
+    // Stage-Punkt unter der alten Fingermitte bleibt unter der neuen Fingermitte
+    const qx = (m0.x - v.tx) / v.s, qy = (m0.y - v.ty) / v.s;
+    v.s = sNew; v.tx = m1.x - sNew * qx; v.ty = m1.y - sNew * qy;
+  }
+  clampView(v);
+  storeView(v);
+  applyViewTransform();
+}
+
+function resetView(){
+  settings.view = { cx: 0.5, cy: 0.5, scale: 1 };
+  applyViewTransform();
+}
+
+stage.addEventListener('pointerdown', e => {
+  if (gesturesBlocked()) return;
+  try { stage.setPointerCapture(e.pointerId); } catch(err){}
+  pointers.set(e.pointerId, stagePoint(e));
+  startGestureIfNeeded();
+  if (pointers.size === 1) tapInfo = { t: performance.now(), p: stagePoint(e), moved: false };
+  else tapInfo = null;
+});
+stage.addEventListener('pointermove', e => {
+  if (!pointers.has(e.pointerId)) return;
+  if (gesturesBlocked()){ pointers.clear(); endGesture(); return; }
+  const prev = new Map(pointers);
+  const pt = stagePoint(e);
+  pointers.set(e.pointerId, pt);
+  if (tapInfo && Math.hypot(pt.x - tapInfo.p.x, pt.y - tapInfo.p.y) > 10) tapInfo.moved = true;
+  applyMove(prev, pointers);
+});
+function pointerEnd(e){
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  // Doppeltippen im Zeichnen-Modus -> Gesamtansicht
+  if (e.type === 'pointerup' && pointers.size === 0 && tapInfo && !tapInfo.moved &&
+      performance.now() - tapInfo.t < 300){
+    const now = performance.now();
+    if (lastTap && now - lastTap.t < 350 && Math.hypot(tapInfo.p.x - lastTap.p.x, tapInfo.p.y - lastTap.p.y) < 40){
+      if (settings.ui.mode === 'draw' && !settings.ui.locked) resetView();
+      lastTap = null;
+    } else lastTap = { t: now, p: tapInfo.p };
+  }
+  if (pointers.size === 0){ tapInfo = null; endGesture(); }
+}
+stage.addEventListener('pointerup', pointerEnd);
+stage.addEventListener('pointercancel', pointerEnd);
+
+/* ================= Modus, Sperre ================= */
+function applyUi(){
+  const align = settings.ui.mode === 'align';
+  modeAlign.classList.toggle('active', align);  modeAlign.setAttribute('aria-pressed', align);
+  modeDraw.classList.toggle('active', !align);  modeDraw.setAttribute('aria-pressed', !align);
+  chipMode.textContent = align ? 'Ausrichten' : 'Zeichnen';
+  resetBtn.disabled = !align;
+  const L = settings.ui.locked;
+  lockBtn.classList.toggle('locked', L);
+  lockBtn.setAttribute('aria-pressed', L);
+  $('lockLbl').textContent = L ? 'Gesperrt' : 'Sperre';
+  $('lockPath').setAttribute('d', L ? 'M8 11V8a4 4 0 0 1 8 0v3' : 'M8 11V8a4 4 0 0 1 7.5-2');
+  chipLock.classList.toggle('hide', !L);
+  stage.classList.toggle('locked', L);
+}
+function setMode(m){
+  settings.ui.mode = m;
+  pointers.clear(); endGesture(); lastTap = null;
+  applyUi();
+}
+modeAlign.addEventListener('click', () => setMode('align'));
+modeDraw.addEventListener('click', () => setMode('draw'));
+lockBtn.addEventListener('click', () => {
+  settings.ui.locked = !settings.ui.locked;
+  pointers.clear(); endGesture();
+  applyUi();
+});
+resetBtn.addEventListener('click', () => {
+  Object.assign(settings.photo, { x: 0, y: 0, scale: 1, rotation: 0 });
+  applyPhotoTransform();
+});
+
+/* ================= Bildschirm bleibt an (Wake Lock) ================= */
+let wakeLock = null;
+async function requestWakeLock(){
+  if (!('wakeLock' in navigator) || document.hidden || !stream) return;
+  if (wakeLock && !wakeLock.released) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { if (info.classList.contains('show')) renderInfo(); });
+  } catch(e){ wakeLock = null; }
+}
+function releaseWakeLock(){
+  try { if (wakeLock && !wakeLock.released) wakeLock.release(); } catch(e){}
+  wakeLock = null;
+}
+const wakeLockActive = () => !!(wakeLock && !wakeLock.released);
+
+/* ================= Vollbild ================= */
+const fsEl = document.documentElement;
+const fsSupported = !!(document.fullscreenEnabled && fsEl.requestFullscreen);
+const isFs = () => !!document.fullscreenElement;
+if (!fsSupported) fsBtn.style.display = 'none';
+fsBtn.addEventListener('click', async () => {
+  try {
+    if (isFs()) await document.exitFullscreen();
+    else await fsEl.requestFullscreen({ navigationUI: 'hide' });
+  } catch(e){ showMsg('Vollbild ist hier nicht möglich.', true); }
+});
+document.addEventListener('fullscreenchange', () => {
+  $('fsLbl').textContent = isFs() ? 'Beenden' : 'Vollbild';
+  $('fsPath').setAttribute('d', isFs() ? 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5'
+                                        : 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5');
+  scheduleLayout();
+});
 
 /* ================= Kamera ================= */
 function cameraErrorText(e){
@@ -301,6 +605,7 @@ function stopCamera(){
   cam.srcObject = null;
   cam.style.display = 'none';
   camBtn.classList.remove('on');
+  releaseWakeLock();
   layout(); updateHint();
 }
 
@@ -315,7 +620,7 @@ async function startCamera(){
     return;
   }
   stopCamera();
-  camBtn.disabled = true; camBtn.textContent = 'Starte …';
+  camBtn.disabled = true; $('camLbl').textContent = 'Starte …';
 
   // Reihenfolge: Rückkamera mit hoher Auflösung → irgendeine Kamera hoch → irgendeine Kamera
   const res = { width: { ideal: 1920 }, height: { ideal: 1080 } };
@@ -333,29 +638,31 @@ async function startCamera(){
       if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) break;  // kein Sinn weiterzuprobieren
     }
   }
-  camBtn.disabled = false; camBtn.textContent = 'Kamera starten';
+  camBtn.disabled = false; $('camLbl').textContent = 'Kamera';
   if (!s){ showMsg(cameraErrorText(lastErr), true); return; }
 
   stream = s;
   camWasRunning = false;
   const track = stream.getVideoTracks()[0];
   if (track) track.addEventListener('ended', () => {
-    if (stream){ stopCamera(); showMsg('Die Kamera wurde beendet. Tippe auf „Kamera starten“.', true); }
+    if (stream){ stopCamera(); showMsg('Die Kamera wurde beendet. Tippe auf „Kamera“.', true); }
   });
   cam.srcObject = stream;
   cam.style.display = 'block';
   camBtn.classList.add('on');
   try { await cam.play(); } catch(e){ /* autoplay ist muted; Fehler hier ignorieren */ }
   updateHint(); scheduleLayout();
+  requestWakeLock();
 }
 camBtn.addEventListener('click', startCamera);
 
-// Kamera beim Verstecken stoppen, danach neu startbar
+// Kamera beim Verstecken stoppen, danach neu startbar; Wake Lock nach Rückkehr neu anfordern
 document.addEventListener('visibilitychange', () => {
   if (document.hidden){
     if (stream){ camWasRunning = true; stopCamera(); }
-  } else if (camWasRunning){
-    showMsg('Kamera wurde pausiert, während die App im Hintergrund war. Tippe auf „Kamera starten“.', false);
+  } else {
+    if (stream) requestWakeLock();
+    if (camWasRunning) showMsg('Kamera wurde pausiert, während die App im Hintergrund war. Tippe auf „Kamera“.', false);
   }
 });
 window.addEventListener('pagehide', () => { if (stream) stopCamera(); });
@@ -417,6 +724,9 @@ async function renderInfo(){
               : st.facingMode === 'user' ? 'Frontkamera' : 'unbekannt';
     } catch(e){}
   }
+  const wl = !('wakeLock' in navigator) ? '<span class="nein">nicht verfügbar</span>'
+           : wakeLockActive() ? '<span class="ja">aktiv</span>' : '<span class="nein">nicht aktiv</span>';
+  const fs = !fsSupported ? '<span class="nein">nicht unterstützt</span>' : (isFs() ? 'an' : 'aus');
   const rows = [
     ['Version', esc(APP_VERSION)],
     ['Sichere Verbindung (https)', yn(window.isSecureContext)],
@@ -424,6 +734,8 @@ async function renderInfo(){
     ['Kamera aktiv', camRow],
     ['Kamera-Typ', esc(camType)],
     ['Wake Lock verfügbar', yn('wakeLock' in navigator)],
+    ['Bildschirm bleibt an', wl],
+    ['Vollbild', fs],
     ['Bildschirm', esc(innerWidth + ' × ' + innerHeight + ' (Pixeldichte ' + (window.devicePixelRatio || 1) + ')')]
   ];
   infoBody.innerHTML = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
@@ -438,6 +750,7 @@ document.addEventListener('dblclick', e => e.preventDefault());
 /* ================= Start ================= */
 setOpacity(settings.photo.opacity * 100);
 applyBar();
+applyUi();
 layout();
 updateHint();
 </script>

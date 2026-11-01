@@ -2,7 +2,7 @@
 <!--
   Zeichenhilfe – Overlay und Perspektive
   Autor: Benjamin Dormoros
-  Version: siehe APP_VERSION im Skript (aktuell 0.5)
+  Version: siehe APP_VERSION im Skript (aktuell 0.7)
 
   Änderungsverlauf
   ----------------
@@ -41,6 +41,23 @@
                     dieselbe Ansicht- und Foto-Transformation bekommt; Strichstärke bleibt konstant
                     (vector-effect: non-scaling-stroke). Gespeichert in settings.guides.
                     Info-Fenster: "Daten" oben, "Diagnose" einklappbar.
+  0.6 (2026-11-01)  Perspektive: Schalter "Perspektive" im Einstellfeld des Modus Ausrichten, 4 Eckgriffe
+                    (36 px nach außen versetzt, mit Verbindungslinie), freie Ecken -> Homographie als
+                    CSS matrix3d auf #photo; überschlagene/eingedellte Vierecke werden verhindert;
+                    "Perspektive zurücksetzen". Hilfslinien werden jetzt Punkt für Punkt selbst in
+                    Bildschirm-Koordinaten umgerechnet (gerade Linien bleiben unter einer Homographie
+                    gerade) und ohne Transform gezeichnet -> überall gleich dünn. Raster nur Schwarz
+                    (Standard) / Weiß ohne Kontur, Horizont ohne Kontur und ohne Beschriftung.
+                    Einstellfeld (Ausrichten und Linien) einklappbar, Zustand gespeichert.
+                    "Zurücks." setzt jetzt auch die Perspektive zurück.
+  0.7 (2026-11-01)  Neugestaltung der Oberfläche (keine neuen Funktionen, Logik unverändert):
+                    schmale senkrechte Leiste rechts (Modi, Foto, Deckkraft, Einstellungen, Sperre, Mehr)
+                    mit Linien-Symbolen ohne Beschriftung, kurzer Hinweis beim Antippen; Deckkraft als
+                    dünner senkrechter Regler; Mehr-Menü (Kamera, Foto/Perspektive zurücksetzen, Vollbild,
+                    Drehung, Info); Moduseinstellungen als kleines Feld (Standard zu); keine Titelzeile,
+                    keine Versionsanzeige; Zoom-Anzeige nur kurz beim Zoomen; im Modus Zeichnen blendet
+                    ein Tipp aufs Bild die Bedienung aus/ein (Doppeltippen = 1× bleibt); einfarbig weiß
+                    auf dunklem, halbtransparentem Grund; Griffe als dünne Kreise.
 
   VERSIONSNUMMER: wird NUR hier in APP_VERSION gepflegt. sw.js erhält sie über die Adresse
   (./sw.js?v=APP_VERSION) und benennt damit seinen Cache. Zusätzliche Dateien neben index.html:
@@ -55,9 +72,10 @@
          ├ #photoLayer  FOTO-Transformation (nur das Foto verschieben/zoomen/drehen)
          │   └ #photo
          └ #guides      (leer, Platzhalter aus 0.1)
-  #guideSvg     Hilfslinien über der ganzen Bildschirmfläche. Gruppe #gPhoto trägt rechnerisch
-                dieselbe Transformation wie Ansicht × Papier × Foto (siehe guideMatrix()),
-                #gScreen enthält Horizont, Beschriftung und Griffe in Bildschirm-Koordinaten.
+  #guideSvg     Hilfslinien über der ganzen Bildschirmfläche, alles in Bildschirm-Koordinaten.
+                Abbildung Foto-Einheiten -> Bildschirm = Ansicht × Papier × Foto-Lage × Perspektive
+                (computeGeom(): Matrix "Full", 3×3 projektiv). #photo bekommt dieselbe
+                Perspektive als matrix3d (transform-origin 0 0).
 -->
 <html lang="de">
 <head>
@@ -70,32 +88,42 @@
 <link rel="apple-touch-icon" href="./icon-192.png">
 <title>Zeichenhilfe</title>
 <style>
+  /* ===== Gestaltung 0.7: ruhig, einfarbig, Bedienung schwebt rechts über dem Bild ===== */
   :root{
-    --bar-bg: rgba(18,18,18,.62);
+    --ui-bg: rgba(18,18,18,.55);          /* halbtransparenter dunkler Grund */
+    --ui-solid: rgba(20,20,20,.88);
     --fg: #fff;
-    --muted: rgba(255,255,255,.7);
-    --btn: rgba(255,255,255,.16);
-    --btn-press: rgba(255,255,255,.32);
-    --accent: #4da3ff;
-    --err: #ff6b6b;
+    --icon: rgba(255,255,255,.9);         /* normale Symbole */
+    --icon-off: rgba(255,255,255,.5);     /* inaktive Symbole */
+    --muted: rgba(255,255,255,.55);
+    --line: rgba(255,255,255,.1);
+    --press: rgba(255,255,255,.08);
     --st: env(safe-area-inset-top, 0px);
     --sr: env(safe-area-inset-right, 0px);
     --sb: env(safe-area-inset-bottom, 0px);
     --sl: env(safe-area-inset-left, 0px);
+    --rail-w: 52px;
+    --rail-r: calc(10px + var(--sr));
+    --pop-r: calc(var(--rail-r) + var(--rail-w) + 8px);
+  }
+  /* ohne Unschärfe-Effekt etwas dunkler */
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))){
+    :root{ --ui-bg: rgba(18,18,18,.8); }
   }
   *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body{
     margin:0; height:100%; overflow:hidden; background:#000; color:var(--fg);
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size:14px; font-weight:400;
     overscroll-behavior:none; touch-action:none;
     -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
   }
   body{ position:fixed; inset:0; }
+  button{ font:inherit; color:inherit; }
 
   /* ---------- Ebenen ---------- */
   #stage{ position:absolute; inset:0; overflow:hidden; touch-action:none; background:#000; }
   #stage.locked::after{ content:""; position:absolute; inset:0; pointer-events:none;
-                        box-shadow: inset 0 0 0 3px var(--err); }
+                        box-shadow: inset 0 0 0 1px rgba(255,255,255,.16); }   /* Sperre: nur feine Andeutung */
   /* Ursprung oben links: Bildschirm = Verschiebung + Zoom × Position */
   #view{ position:absolute; inset:0; transform-origin:0 0; }
   /* will-change nur während einer Geste, danach wird wieder scharf gerendert */
@@ -103,150 +131,152 @@
   #paper{ position:absolute; left:0; top:0; overflow:hidden; background:#151515; }
   #cam{ position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:none; }
   #photoLayer{ position:absolute; inset:0; transform-origin:50% 50%; pointer-events:none; }
-  #photo{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+  #photo{ position:absolute; left:0; top:0; transform-origin:0 0;
           max-width:none; max-height:none; display:none; opacity:.5; }
   #guides{ position:absolute; inset:0; pointer-events:none; }
-
   #hint{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-         padding:24px; text-align:center; color:var(--muted); font-size:16px; line-height:1.5;
+         padding:24px 80px 24px 24px; text-align:center; color:var(--muted); font-size:14px; line-height:1.5;
          pointer-events:none; }
 
-  /* ---------- Status oben (Modus, Sperre, Zoom) ---------- */
-  #top{ position:absolute; z-index:9; top:calc(8px + var(--st)); left:50%; transform:translateX(-50%);
-        display:flex; gap:6px; pointer-events:none; }
-  .chip{ font-size:13px; padding:4px 9px; border-radius:999px; background:rgba(0,0,0,.55);
-         white-space:nowrap; font-variant-numeric:tabular-nums; }
-  .chip.lock{ background:var(--err); color:#fff; font-weight:600; }
-  .chip.hide{ display:none; }
-
-  /* ---------- Bedienleiste (Hochformat: unten) ---------- */
-  #bar{
-    position:absolute; left:0; right:0; bottom:0; z-index:10;
-    display:grid; grid-template-columns:repeat(7, 1fr); gap:5px; align-items:center;
-    padding:8px calc(8px + var(--sr)) calc(8px + var(--sb)) calc(8px + var(--sl));
-    background:var(--bar-bg); -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
-    touch-action:manipulation;
-  }
-  #bar.hidden{ display:none; }
-  #bar > .seg, #bar > .opacity{ grid-column:1 / -1; }
-  .btn{
-    min-height:44px; min-width:44px; padding:0 14px; border:0; border-radius:12px;
-    background:var(--btn); color:var(--fg); font:inherit; font-size:15px; cursor:pointer;
-    touch-action:manipulation;
-  }
-  .btn:active{ background:var(--btn-press); }
-  .btn:disabled{ opacity:.35; }
-  .ibtn{
-    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
-    min-height:50px; min-width:44px; padding:4px 2px; font-size:11px; line-height:1.1;
-  }
-  .ibtn svg{ width:22px; height:22px; fill:none; stroke:currentColor; stroke-width:2;
-             stroke-linecap:round; stroke-linejoin:round; }
-  .ibtn.on{ box-shadow: inset 0 0 0 2px var(--accent); }
-  .ibtn.locked{ background:var(--err); }
-  .ibtn.fixed{ background:var(--accent); color:#00213f; font-weight:700; }
-  #infoBtn{ position:relative; }
-  #infoBtn.dot::after{ content:""; position:absolute; top:5px; right:8px; width:9px; height:9px;
-                       border-radius:50%; background:var(--accent); }
-  #installBtn{ width:100%; margin-top:12px; background:var(--accent); color:#00213f; font-weight:700; display:none; }
-  #installBtn.show{ display:block; }
-  .seg{ display:flex; border-radius:12px; overflow:hidden; background:var(--btn); }
-  .seg .btn{ flex:1; border-radius:0; background:transparent; font-weight:500; }
-  .seg .btn.active{ background:var(--accent); color:#00213f; font-weight:700; }
-  .opacity{ display:flex; align-items:center; gap:8px; min-height:44px; padding:0 6px; }
-  .opacity label{ font-size:14px; color:var(--muted); white-space:nowrap; }
-  .opacity input[type=range]{ flex:1; min-width:90px; height:44px; accent-color:var(--accent); touch-action:pan-x; }
-  #opVal{ min-width:44px; text-align:right; font-variant-numeric:tabular-nums; font-size:15px; }
-
-  /* ---------- Ecken-Elemente ---------- */
-  #barToggle{
-    position:absolute; z-index:11; top:calc(8px + var(--st)); right:calc(8px + var(--sr));
-    width:44px; height:44px; padding:0; border-radius:50%; font-size:20px;
-    background:var(--bar-bg);
-  }
-  #ver{
-    position:absolute; z-index:9; top:calc(6px + var(--st)); left:calc(8px + var(--sl));
-    font-size:11px; color:var(--muted); background:rgba(0,0,0,.35); padding:2px 6px; border-radius:6px;
-    pointer-events:none;
-  }
-
-  /* ---------- Querformat: Leiste rechts ---------- */
   /* ---------- Hilfslinien ---------- */
   #guideSvg{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:hidden; }
-  #guideSvg .nss{ vector-effect:non-scaling-stroke; fill:none; stroke-linecap:butt; }
-  #guideSvg .hLbl{ font:600 12px system-ui, sans-serif; paint-order:stroke; stroke:rgba(0,0,0,.6); stroke-width:3px; }
-  #guideSvg .handle{ fill:rgba(255,255,255,.18); stroke:rgba(255,255,255,.85); stroke-width:1.5px; }
-  #guideSvg .handle.mid{ fill:rgba(255,196,0,.25); }
-  #linesPanel{ position:absolute; z-index:10; left:calc(8px + var(--sl)); right:calc(8px + var(--sr)); bottom:180px;
-               display:none; flex-direction:column; gap:6px; padding:6px; border-radius:12px;
-               background:var(--bar-bg); -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
-               touch-action:manipulation; max-width:420px; margin:0 auto; }
-  #linesPanel.show{ display:flex; }
-  #linesPanel .row{ display:flex; gap:5px; align-items:center; }
-  #linesPanel .btn{ padding:0 8px; font-size:13px; }
-  #linesPanel .tog.on{ background:var(--accent); color:#00213f; font-weight:700; }
-  .stepper{ display:flex; align-items:center; gap:2px; }
-  .stepper .btn{ padding:0; width:44px; font-size:20px; }
-  #gN{ min-width:58px; text-align:center; font-size:13px; font-variant-numeric:tabular-nums; }
-  .sw{ width:44px; min-width:44px; padding:0 !important; display:flex; align-items:center; justify-content:center; }
-  .sw i{ display:block; width:20px; height:20px; border-radius:50%; box-shadow:0 0 0 2px rgba(255,255,255,.35); }
-  .sw.on{ box-shadow: inset 0 0 0 2px var(--accent); }
-  .grow{ flex:1; }
+  #guideSvg .ln{ fill:none; stroke-linecap:butt; }
+  #guideSvg .handle{ fill:none; stroke:rgba(255,255,255,.9); stroke-width:1.25px; }
+  #guideSvg .cLink{ stroke:rgba(255,255,255,.45); stroke-width:1px; }
 
-  @media (orientation: landscape){
-    #bar{
-      top:0; bottom:0; left:auto; right:0; width:calc(204px + var(--sr));
-      grid-template-columns:repeat(3, 1fr); align-content:center; gap:5px;
-      padding:calc(8px + var(--st)) calc(8px + var(--sr)) calc(8px + var(--sb)) 8px;
-      overflow-y:auto;
-    }
-    .seg{ flex-direction:column; }
-    .seg .btn{ padding:0 4px; font-size:13px; min-height:40px; }
-    #linesPanel{ left:calc(8px + var(--sl)); right:auto; bottom:calc(8px + var(--sb)); width:380px; margin:0; }
-    .opacity{ flex-wrap:wrap; padding:0; gap:0 6px; }
-    .opacity label{ flex:1; }
-    .opacity input[type=range]{ flex:1 1 100%; order:3; }
-    #barToggle{ right:auto; left:calc(8px + var(--sl)); }
-    #ver{ top:auto; bottom:calc(6px + var(--sb)); }
+  /* ---------- schwebende Flächen ---------- */
+  .glass{ background:var(--ui-bg); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+          box-shadow:0 6px 24px rgba(0,0,0,.22); }
+
+  /* ---------- Leiste rechts (Hoch- und Querformat) ---------- */
+  #bar{
+    position:absolute; z-index:10; right:var(--rail-r); top:50%; transform:translateY(-50%);
+    width:var(--rail-w); padding:4px; border-radius:26px;
+    display:flex; flex-direction:column; align-items:center;
+    touch-action:manipulation; transition:opacity .2s ease, transform .2s ease;
   }
+  #bar.hidden{ opacity:0; pointer-events:none; transform:translateY(-50%) translateX(10px); }
+  .ic{ position:relative; width:44px; height:44px; padding:0; border:0; border-radius:50%; background:none;
+       color:var(--icon); display:flex; align-items:center; justify-content:center; cursor:pointer;
+       touch-action:manipulation; }
+  .ic svg{ width:22px; height:22px; fill:none; stroke:currentColor; stroke-width:1.75;
+           stroke-linecap:round; stroke-linejoin:round; }
+  .ic:active{ background:var(--press); }
+  .ic:disabled{ opacity:.3; }
+  .ic.mode{ color:var(--icon-off); }
+  .ic.on{ color:#fff; }
+  /* aktiv: kleiner weißer Punkt links neben dem Symbol */
+  .ic.on::after{ content:""; position:absolute; left:1px; top:50%; width:4px; height:4px; margin-top:-2px;
+                 border-radius:50%; background:#fff; }
+  .ic.dot::before{ content:""; position:absolute; right:9px; top:9px; width:5px; height:5px; border-radius:50%;
+                   background:#fff; }
+  .sep{ width:18px; height:1px; margin:4px 0; background:var(--line); }
 
-  /* ---------- Meldungen und Info ---------- */
+  /* ausgeblendet: winziger Punkt am rechten Rand */
+  #barToggle{ position:absolute; z-index:10; right:calc(2px + var(--sr)); top:50%; width:44px; height:44px;
+              margin-top:-22px; padding:0; border:0; background:none; display:none; cursor:pointer; }
+  #barToggle::after{ content:""; position:absolute; right:8px; top:50%; width:6px; height:6px; margin-top:-3px;
+                     border-radius:50%; background:rgba(255,255,255,.45); }
+  #barToggle.show{ display:block; animation:fadeIn .25s ease; }
+  @keyframes fadeIn{ from{ opacity:0; } to{ opacity:1; } }
+
+  /* kurzer Hinweis beim Antippen eines Symbols */
+  #railTip{ position:absolute; z-index:12; right:var(--pop-r); padding:4px 10px; border-radius:10px;
+            font-size:13px; white-space:nowrap; pointer-events:none; opacity:0; transition:opacity .15s; }
+  #railTip.show{ opacity:1; }
+
+  /* ---------- Felder neben der Leiste ---------- */
+  .pop{ position:absolute; z-index:11; right:var(--pop-r); border-radius:16px; padding:6px;
+        display:none; touch-action:manipulation; }
+  .pop.show{ display:block; animation:fadeIn .15s ease; }
+  /* Deckkraft: dünner senkrechter Regler */
+  #opPop{ width:52px; padding:8px 4px; text-align:center; }
+  #opVal{ display:block; font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; margin-bottom:4px; }
+  #opacity{ writing-mode:vertical-lr; direction:rtl; width:44px; height:150px; margin:0; accent-color:#fff;
+            touch-action:none; cursor:pointer; }
+  /* Mehr-Menü */
+  #moreMenu{ width:252px; }
+  #camBtn.on::after{ display:none; }
+  .mi{ display:flex; align-items:center; gap:12px; width:100%; min-height:44px; padding:0 12px 0 10px;
+       border:0; border-radius:10px; background:none; color:var(--icon); text-align:left; cursor:pointer; }
+  .mi svg{ width:20px; height:20px; flex:none; fill:none; stroke:currentColor; stroke-width:1.75;
+           stroke-linecap:round; stroke-linejoin:round; }
+  .mi:active{ background:var(--press); }
+  .mi:disabled{ opacity:.35; }
+  .mi span{ flex:1; }
+  .mi.on::after{ content:""; width:5px; height:5px; border-radius:50%; background:#fff; }
+  .mi.dot::after{ content:""; width:5px; height:5px; border-radius:50%; background:#fff; }
+  /* Moduseinstellungen */
+  #modePanel{ width:216px; }
+  .pt{ display:flex; align-items:center; width:100%; min-height:44px; padding:0 12px; border:0; border-radius:10px;
+       background:none; color:var(--icon-off); text-align:left; cursor:pointer; }
+  .pt:active, .pb:active{ background:var(--press); }
+  .pt:disabled{ opacity:.35; }
+  .pt span{ flex:1; }
+  .pt i{ width:8px; height:8px; border-radius:50%; box-shadow:inset 0 0 0 1.25px rgba(255,255,255,.5); }
+  .pt.on{ color:#fff; }
+  .pt.on i{ background:#fff; box-shadow:none; }
+  .pt.act{ color:var(--icon); }
+  .prow{ display:flex; align-items:center; min-height:44px; padding-left:12px; color:var(--icon-off); }
+  .prow .pl{ flex:1; }
+  .pb{ width:44px; height:44px; padding:0; border:0; border-radius:50%; background:none; color:var(--icon);
+       font-size:18px; cursor:pointer; }
+  .pb:disabled{ opacity:.3; }
+  #gN{ min-width:24px; text-align:center; color:#fff; font-variant-numeric:tabular-nums; }
+  .sw{ position:relative; width:44px; height:44px; padding:0; border:0; background:none; cursor:pointer; }
+  .sw i{ position:absolute; left:50%; top:50%; width:14px; height:14px; margin:-7px 0 0 -7px; border-radius:50%;
+         box-shadow:0 0 0 1px rgba(255,255,255,.35); }
+  .sw.on i{ box-shadow:0 0 0 1.5px rgba(18,18,18,1), 0 0 0 3px #fff; }
+  .psep{ height:1px; margin:4px 8px; background:var(--line); }
+
+  /* Zoom-Anzeige: klein, nur kurz beim Zoomen */
+  #chipZoom{ position:absolute; z-index:9; top:calc(12px + var(--st)); left:50%; transform:translateX(-50%);
+             padding:3px 8px; border-radius:10px; background:rgba(0,0,0,.35); color:rgba(255,255,255,.85);
+             font-size:12px; font-variant-numeric:tabular-nums; pointer-events:none; transition:opacity .3s; }
+  #chipZoom.hide{ opacity:0; }
+
+  /* ---------- Meldungen, Info, Bestätigung ---------- */
+  .btn{ min-height:44px; padding:0 14px; border:0; border-radius:12px; background:rgba(255,255,255,.08);
+        color:var(--fg); font-size:14px; cursor:pointer; touch-action:manipulation; }
+  .btn:active{ background:rgba(255,255,255,.16); }
+  .btn:disabled{ opacity:.35; }
   #msg{
-    position:absolute; z-index:20; left:50%; top:calc(60px + var(--st)); transform:translateX(-50%);
-    width:min(92vw, 440px); padding:12px 44px 12px 14px; border-radius:12px;
-    background:rgba(30,30,30,.92); border-left:4px solid var(--accent);
-    font-size:15px; line-height:1.4; display:none;
+    position:absolute; z-index:20; left:50%; top:calc(16px + var(--st)); transform:translateX(-50%);
+    width:min(calc(100vw - 100px), 420px); margin-left:-30px; padding:10px 44px 10px 14px; border-radius:14px;
+    background:var(--ui-solid); font-size:14px; line-height:1.4; display:none;
   }
-  #msg.error{ border-left-color:var(--err); }
   #msg.show{ display:block; }
   #msgClose{ position:absolute; top:0; right:0; width:44px; height:44px; background:none; border:0;
-             color:var(--fg); font-size:20px; }
+             color:var(--muted); font-size:18px; }
   #info{
     position:absolute; z-index:30; left:50%; top:50%; transform:translate(-50%,-50%);
-    width:min(92vw, 380px); max-height:86vh; overflow:auto; padding:16px; border-radius:14px;
-    background:rgba(24,24,24,.96); display:none; touch-action:pan-y;
+    width:min(92vw, 360px); max-height:88vh; overflow:auto; padding:16px; border-radius:18px;
+    background:var(--ui-solid); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+    box-shadow:0 8px 30px rgba(0,0,0,.3); display:none; touch-action:pan-y;
   }
   #info.show{ display:block; }
-  #info h2{ margin:0 0 10px; font-size:17px; }
-  #diagBox{ margin-top:14px; }
-  #diagBox summary{ min-height:44px; display:flex; align-items:center; cursor:pointer; font-size:13px;
-                    text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
-  #info h3{ margin:16px 0 4px; font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  #info h2{ margin:0 0 8px; font-size:16px; font-weight:400; }
+  #info h3{ margin:12px 0 2px; font-size:12px; font-weight:400; color:var(--muted); }
+  #diagBox{ margin-top:10px; }
+  #diagBox summary{ min-height:44px; display:flex; align-items:center; cursor:pointer; font-size:12px;
+                    color:var(--muted); list-style:none; }
+  #diagBox summary::-webkit-details-marker{ display:none; }
   .infoBtns{ display:flex; gap:8px; margin-top:10px; }
-  .infoBtns .btn{ flex:1; font-size:14px; padding:0 8px; }
-  .btn.danger{ background:rgba(255,107,107,.22); }
-  #confirmBox{ display:none; margin-top:10px; padding:10px; border-radius:10px; background:rgba(255,107,107,.15);
+  .infoBtns .btn{ flex:1; padding:0 8px; }
+  #confirmBox{ display:none; margin-top:10px; padding:12px; border-radius:12px; background:rgba(255,255,255,.06);
                font-size:14px; line-height:1.4; }
   #confirmBox.show{ display:block; }
-  #toast{ position:absolute; z-index:25; left:50%; top:calc(44px + var(--st)); transform:translateX(-50%);
-          padding:6px 12px; border-radius:999px; background:rgba(0,0,0,.7); font-size:13px;
+  #toast{ position:absolute; z-index:25; left:50%; top:calc(16px + var(--st)); transform:translateX(-50%);
+          padding:5px 12px; border-radius:12px; background:rgba(0,0,0,.55); font-size:13px; color:rgba(255,255,255,.85);
           opacity:0; transition:opacity .4s; pointer-events:none; white-space:nowrap; }
   #toast.show{ opacity:1; }
-  #info table{ width:100%; border-collapse:collapse; font-size:14px; }
-  #info td{ padding:6px 0; border-bottom:1px solid rgba(255,255,255,.1); vertical-align:top; }
+  #info table{ width:100%; border-collapse:collapse; font-size:13px; }
+  #info td{ padding:6px 0; border-bottom:1px solid var(--line); vertical-align:top; }
   #info td:first-child{ color:var(--muted); padding-right:10px; }
-  .ja{ color:#7ee08a; } .nein{ color:var(--err); }
-  #infoClose{ margin-top:12px; width:100%; }
+  .ja{ color:#fff; } .nein{ color:var(--muted); }
+  #installBtn{ width:100%; margin-top:10px; display:none; }
+  #installBtn.show{ display:block; }
+  #infoClose{ margin-top:10px; width:100%; }
   #file{ display:none; }
 </style>
 </head>
@@ -261,89 +291,107 @@
     </div>
   </div>
   <svg id="guideSvg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-    <g id="gPhoto">
-      <path id="gridShadow" class="nss" d=""/>
-      <path id="gridLine" class="nss" d=""/>
+    <path id="gridLine" class="ln" d=""/>
+    <path id="horLine" class="ln" stroke="#ffc400" stroke-width="2" d=""/>
+    <g id="handles">
+      <circle id="hMid" class="handle mid" r="7"/>
+      <circle id="hEndA" class="handle" r="6"/>
+      <circle id="hEndB" class="handle" r="6"/>
     </g>
-    <g id="gScreen">
-      <path id="horShadow" fill="none" stroke="rgba(0,0,0,.55)" stroke-width="4" d=""/>
-      <path id="horLine" fill="none" stroke="#ffc400" stroke-width="2" d=""/>
-      <text id="horLbl" class="hLbl" fill="#ffc400">Horizont</text>
-      <g id="handles">
-        <circle id="hMid" class="handle mid" r="10"/>
-        <circle id="hEndA" class="handle" r="9"/>
-        <circle id="hEndB" class="handle" r="9"/>
-      </g>
+    <g id="cornerHandles">
+      <line class="cLink"/><line class="cLink"/><line class="cLink"/><line class="cLink"/>
+      <circle class="handle corner" r="7"/><circle class="handle corner" r="7"/>
+      <circle class="handle corner" r="7"/><circle class="handle corner" r="7"/>
     </g>
   </svg>
-  <div id="hint">Tippe auf „Kamera starten“ und „Foto wählen“.</div>
+  <div id="hint">Foto wählen: Bild-Symbol rechts.<br>Kamera: ⋯ → Kamera starten.</div>
 </div>
 
-<div id="ver">v0.2</div>
-<div id="top">
-  <span id="chipMode" class="chip">Ausrichten</span>
-  <span id="chipLock" class="chip lock hide">Gesperrt</span>
-  <span id="chipZoom" class="chip hide">1×</span>
-</div>
-<button id="barToggle" class="btn" aria-label="Leiste aus-/einblenden" title="Leiste aus-/einblenden">✕</button>
+<div id="chipZoom" class="hide">1×</div>
+<button id="barToggle" aria-label="Bedienung einblenden"></button>
+<div id="railTip" class="glass"></div>
 
-<div id="bar">
-  <div class="seg" role="group" aria-label="Modus">
-    <button id="modeAlign" class="btn active" aria-pressed="true">Ausrichten</button>
-    <button id="modeLines" class="btn" aria-pressed="false">Linien</button>
-    <button id="modeDraw" class="btn" aria-pressed="false">Zeichnen</button>
-  </div>
-  <button id="camBtn" class="btn ibtn" title="Kamera starten">
-    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
-    <span id="camLbl">Kamera</span>
+<!-- Leiste rechts: Modi, Foto, Deckkraft, Einstellungen, Sperre, Mehr -->
+<div id="bar" class="glass" role="toolbar" aria-label="Bedienung">
+  <button id="modeAlign" class="ic mode on" data-tip="Ausrichten" aria-label="Ausrichten" aria-pressed="true">
+    <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M9.5 5.5L12 3l2.5 2.5M9.5 18.5L12 21l2.5-2.5M5.5 9.5L3 12l2.5 2.5M18.5 9.5L21 12l-2.5 2.5"/></svg>
   </button>
-  <button id="photoBtn" class="btn ibtn" title="Foto wählen">
-    <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M4 18l5-5 4 4 3-3 4 4"/></svg>
-    <span>Foto</span>
+  <button id="modeLines" class="ic mode" data-tip="Linien" aria-label="Linien" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 12h16M12 4v16"/></svg>
   </button>
-  <button id="resetBtn" class="btn ibtn" title="Foto zurücksetzen">
-    <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.5-5.8"/><path d="M4 4v4h4"/></svg>
-    <span>Zurücks.</span>
+  <button id="modeDraw" class="ic mode" data-tip="Zeichnen" aria-label="Zeichnen" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><path d="M5 19l1-4L16 5l3 3L9 18z"/><path d="M14 7l3 3"/></svg>
   </button>
-  <button id="lockBtn" class="btn ibtn" title="Gesten sperren" aria-pressed="false">
-    <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path id="lockPath" d="M8 11V8a4 4 0 0 1 7.5-2"/></svg>
-    <span id="lockLbl">Sperre</span>
+  <div class="sep"></div>
+  <button id="photoBtn" class="ic" data-tip="Foto wählen" aria-label="Foto wählen">
+    <svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="M4 17.5l5-4.5 4 3.5 3-2.5 4 3.5"/></svg>
   </button>
-  <button id="fsBtn" class="btn ibtn" title="Vollbild">
+  <button id="opBtn" class="ic" data-tip="Deckkraft" aria-label="Deckkraft">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></svg>
+  </button>
+  <button id="setBtn" class="ic" data-tip="Einstellungen" aria-label="Einstellungen des Modus">
+    <svg viewBox="0 0 24 24"><path d="M4 8h9M17 8h3M4 16h3M11 16h9"/><circle cx="15" cy="8" r="2"/><circle cx="9" cy="16" r="2"/></svg>
+  </button>
+  <button id="lockBtn" class="ic" data-tip="Sperre" aria-label="Gesten sperren" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><rect x="5.5" y="11" width="13" height="9" rx="2"/><path id="lockPath" d="M8.5 11V8a3.5 3.5 0 0 1 6.6-1.6"/></svg>
+  </button>
+  <button id="moreBtn" class="ic" data-tip="Mehr" aria-label="Mehr">
+    <svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="18" cy="12" r="1.2" fill="currentColor"/></svg>
+  </button>
+</div>
+
+<!-- Deckkraft-Regler -->
+<div id="opPop" class="pop glass" role="group" aria-label="Deckkraft">
+  <span id="opVal">50 %</span>
+  <input id="opacity" type="range" min="0" max="100" step="1" value="50" aria-label="Deckkraft des Fotos">
+</div>
+
+<!-- Mehr-Menü -->
+<div id="moreMenu" class="pop glass" role="menu">
+  <button id="camBtn" class="mi" role="menuitem">
+    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
+    <span id="camLbl">Kamera starten</span>
+  </button>
+  <button id="resetBtn" class="mi" role="menuitem">
+    <svg viewBox="0 0 24 24"><path d="M5 12a7 7 0 1 0 2.1-5"/><path d="M5 5v4h4"/></svg>
+    <span>Foto zurücksetzen</span>
+  </button>
+  <button id="pPerspReset" class="mi" role="menuitem">
+    <svg viewBox="0 0 24 24"><path d="M6 6l12 1.5v9L6 18z"/></svg>
+    <span>Perspektive zurücksetzen</span>
+  </button>
+  <button id="fsBtn" class="mi" role="menuitem">
     <svg viewBox="0 0 24 24"><path id="fsPath" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     <span id="fsLbl">Vollbild</span>
   </button>
-  <button id="orientBtn" class="btn ibtn" title="Drehung sperren" aria-pressed="false">
-    <svg viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="18" rx="2"/><path d="M3.5 9a9 9 0 0 1 2.5-3.5M20.5 15a9 9 0 0 1-2.5 3.5"/></svg>
-    <span id="orientLbl">Drehung</span>
+  <button id="orientBtn" class="mi" role="menuitem" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><rect x="8" y="4" width="8" height="16" rx="1.5"/><path d="M4 9a8 8 0 0 1 2-3M20 15a8 8 0 0 1-2 3"/></svg>
+    <span id="orientLbl">Drehung fixieren</span>
   </button>
-  <button id="infoBtn" class="btn ibtn" title="Info">
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+  <button id="infoBtn" class="mi" role="menuitem">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.2"/></svg>
     <span>Info</span>
   </button>
-  <div class="opacity">
-    <label for="opacity">Deckkraft</label>
-    <input id="opacity" type="range" min="0" max="100" step="1" value="50">
-    <span id="opVal">50 %</span>
-  </div>
 </div>
-<div id="linesPanel" role="group" aria-label="Hilfslinien">
-  <div class="row">
-    <button id="gGrid" class="btn tog" aria-pressed="false">Raster</button>
-    <div class="stepper">
-      <button id="gMinus" class="btn" aria-label="Weniger Felder">−</button>
-      <span id="gN">4 Felder</span>
-      <button id="gPlus" class="btn" aria-label="Mehr Felder">+</button>
-    </div>
-    <button id="gBold" class="btn tog grow" aria-pressed="false">Kräftig</button>
+
+<!-- Einstellungen des Modus (Ausrichten / Linien) -->
+<div id="modePanel" class="pop glass" role="group" aria-label="Einstellungen">
+  <div class="pAlign">
+    <button id="pPersp" class="pt" aria-pressed="false"><span>Perspektive</span><i></i></button>
   </div>
-  <div class="row">
-    <button class="btn sw" data-c="white" aria-label="Raster weiß"><i style="background:#fff"></i></button>
-    <button class="btn sw" data-c="black" aria-label="Raster schwarz"><i style="background:#000"></i></button>
-    <button class="btn sw" data-c="red" aria-label="Raster rot"><i style="background:#ff3b30"></i></button>
-    <button class="btn sw" data-c="blue" aria-label="Raster blau"><i style="background:#2f7bff"></i></button>
-    <button id="gHor" class="btn tog grow" aria-pressed="false">Horizont</button>
-    <button id="gLevel" class="btn grow">Waagrecht</button>
+  <div class="pLines">
+    <button id="gGrid" class="pt" aria-pressed="false"><span>Raster</span><i></i></button>
+    <div class="prow"><span class="pl">Felder</span>
+      <button id="gMinus" class="pb" aria-label="Weniger Felder">−</button><span id="gN">4</span><button id="gPlus" class="pb" aria-label="Mehr Felder">+</button>
+    </div>
+    <div class="prow"><span class="pl">Farbe</span>
+      <button class="sw" data-c="black" aria-label="Raster schwarz"><i style="background:#000"></i></button>
+      <button class="sw" data-c="white" aria-label="Raster weiß"><i style="background:#fff"></i></button>
+    </div>
+    <button id="gBold" class="pt" aria-pressed="false"><span>Kräftig</span><i></i></button>
+    <div class="psep"></div>
+    <button id="gHor" class="pt" aria-pressed="false"><span>Horizont</span><i></i></button>
+    <button id="gLevel" class="pt act"><span>Waagrecht</span></button>
   </div>
 </div>
 <input id="file" type="file" accept="image/*">
@@ -352,7 +400,7 @@
 <div id="msg" role="alert"><span id="msgText"></span><button id="msgClose" aria-label="Meldung schließen">×</button></div>
 
 <div id="info" role="dialog" aria-label="Info">
-  <h2>Info</h2>
+  <h2>Info <span id="infoVer" style="font-size:12px;color:var(--muted)"></span></h2>
   <h3>Daten (nur auf diesem Gerät)</h3>
   <table><tbody id="dataBody"></tbody></table>
   <div class="infoBtns">
@@ -377,7 +425,7 @@
 <script>
 'use strict';
 /* ================= Version und Einstellungen ================= */
-const APP_VERSION = '0.5';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
+const APP_VERSION = '0.7';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
 const SETTINGS_FORMAT = 1;          // Format des Einstellungsobjekts; nur abwärtskompatibel ändern
 const STORAGE_KEY = 'zeichenhilfe.settings';
 
@@ -387,17 +435,18 @@ const settings = {
   appVersion: APP_VERSION,
   // Foto: x/y = Verschiebung der Fotomitte als Anteil von Papierbreite/-höhe,
   // scale = Faktor zur "passt ganz hinein"-Größe, rotation in Grad
-  photo: { opacity: 0.5, x: 0, y: 0, scale: 1, rotation: 0 },
+  // corners: Verschiebung der 4 Ecken (oben links, oben rechts, unten rechts, unten links) in Foto-Einheiten
+  photo: { opacity: 0.5, x: 0, y: 0, scale: 1, rotation: 0, corners: [[0,0],[0,0],[0,0],[0,0]] },
   // Ansicht: cx/cy = Papierpunkt (Anteil 0..1) in der Bildschirmmitte, scale = Zoom 1..5
   view:  { cx: 0.5, cy: 0.5, scale: 1 },
-  ui:    { barVisible: true, mode: 'align', locked: false, orientFixed: false },  // locked wird NICHT gespeichert
+  ui:    { barVisible: true, mode: 'align', locked: false, orientFixed: false, perspOn: false, panelCollapsed: false },  // locked wird NICHT gespeichert
   // Hilfslinien im Foto-Koordinatensystem. Einheit: kurze Fotoseite = 1, Ursprung = Fotomitte.
   guides: {
-    grid:    { on: false, n: 4, color: 'white', bold: false },
+    grid:    { on: false, n: 4, color: 'black', bold: false },
     horizon: { on: false, u: 0, v: 0, angle: 0 }   // Punkt auf der Linie (u,v) + Winkel im Foto (Grad)
   }
 };
-const GRID_COLORS = { white: '#ffffff', black: '#000000', red: '#ff3b30', blue: '#2f7bff' };
+const GRID_COLORS = { black: '#000000', white: '#ffffff' };
 const GRID_N_MIN = 2, GRID_N_MAX = 12;
 const HOR_SNAP_DEG = 2;
 const VIEW_MIN = 1, VIEW_MAX = 5;
@@ -423,9 +472,9 @@ function saveSettings(){
   const p = settings.photo, v = settings.view, u = settings.ui;
   return lsSet(STORAGE_KEY, {
     formatVersion: SETTINGS_FORMAT, appVersion: APP_VERSION,
-    photo: { opacity: p.opacity, x: p.x, y: p.y, scale: p.scale, rotation: p.rotation },
+    photo: { opacity: p.opacity, x: p.x, y: p.y, scale: p.scale, rotation: p.rotation, corners: p.corners.map(c => [c[0], c[1]]) },
     view:  { cx: v.cx, cy: v.cy, scale: v.scale },
-    ui:    { barVisible: u.barVisible, mode: u.mode, orientFixed: u.orientFixed },
+    ui:    { barVisible: u.barVisible, mode: u.mode, orientFixed: u.orientFixed, perspOn: u.perspOn, panelCollapsed: u.panelCollapsed },
     guides: JSON.parse(JSON.stringify(settings.guides))
   });
 }
@@ -451,7 +500,12 @@ function mergeSettings(raw){
   const g = obj(raw.guides), gg = obj(g.grid), gh = obj(g.horizon);
   if (typeof gg.on === 'boolean') S.guides.grid.on = gg.on;
   S.guides.grid.n = Math.round(num(gg.n, GRID_N_MIN, GRID_N_MAX, S.guides.grid.n));
-  if (typeof gg.color === 'string' && GRID_COLORS[gg.color]) S.guides.grid.color = gg.color;
+  if (typeof gg.color === 'string') S.guides.grid.color = GRID_COLORS[gg.color] ? gg.color : 'black';   // alte Farben Rot/Blau -> Schwarz
+  if (typeof u.perspOn === 'boolean') S.ui.perspOn = u.perspOn;
+  if (typeof u.panelCollapsed === 'boolean') S.ui.panelCollapsed = u.panelCollapsed;
+  if (Array.isArray(p.corners) && p.corners.length === 4 &&
+      p.corners.every(c => Array.isArray(c) && c.length === 2 && c.every(n => typeof n === 'number' && isFinite(n) && Math.abs(n) <= 10)))
+    S.photo.corners = p.corners.map(c => [c[0], c[1]]);
   if (typeof gg.bold === 'boolean') S.guides.grid.bold = gg.bold;
   if (typeof gh.on === 'boolean') S.guides.horizon.on = gh.on;
   S.guides.horizon.u     = num(gh.u, -100, 100, S.guides.horizon.u);
@@ -521,9 +575,10 @@ const bar = $('bar'), camBtn = $('camBtn'), photoBtn = $('photoBtn'), fileIn = $
 const opacity = $('opacity'), opVal = $('opVal'), infoBtn = $('infoBtn');
 const resetBtn = $('resetBtn'), lockBtn = $('lockBtn'), fsBtn = $('fsBtn');
 const modeAlign = $('modeAlign'), modeDraw = $('modeDraw'), modeLines = $('modeLines');
-const chipMode = $('chipMode'), chipLock = $('chipLock'), chipZoom = $('chipZoom');
+const chipZoom = $('chipZoom');
+const opBtn = $('opBtn'), setBtn = $('setBtn'), moreBtn = $('moreBtn');
+const opPop = $('opPop'), moreMenu = $('moreMenu'), railTip = $('railTip');
 const msg = $('msg'), msgText = $('msgText'), info = $('info'), infoBody = $('infoBody'), dataBody = $('dataBody');
-$('ver').textContent = 'v' + APP_VERSION;
 
 let stream = null;
 let camWasRunning = false;
@@ -557,7 +612,7 @@ function layout(){
   fitPhoto();
   applyPhotoTransform();
   applyViewTransform();
-  if (typeof applyLinesPanel === 'function' && linesPanel) applyLinesPanel();
+  if (typeof applyLinesPanel === 'function' && modePanel) applyLinesPanel();
 }
 
 // Grundgröße: Foto so groß wie möglich, ganz sichtbar, mittig in der Papier-Ebene
@@ -574,6 +629,7 @@ function applyPhotoTransform(){
   photoLayer.style.transform =
     `translate(${p.x * P.w}px, ${p.y * P.h}px) rotate(${p.rotation}deg) scale(${p.scale})`;
   photo.style.opacity = p.opacity;
+  applyPhotoPerspective();
   updateGuides();
 }
 
@@ -608,10 +664,21 @@ function storeView(v){
 function applyViewTransform(){
   V = viewFromSettings();   // Begrenzung nur für die Anzeige; gespeicherte Werte bleiben unverändert
   view.style.transform = `translate(${V.tx}px, ${V.ty}px) scale(${V.s})`;
-  const z = V.s;
-  chipZoom.textContent = z.toFixed(1).replace('.', ',') + '×';
-  chipZoom.classList.toggle('hide', z <= 1.001);
+  flashZoom(V.s);
   updateGuides();
+}
+
+// Zoom-Anzeige nur während/kurz nach dem Zoomen
+let lastZoomShown = null, zoomTimer = null;
+function flashZoom(z){
+  if (lastZoomShown === null){ lastZoomShown = z; return; }
+  if (Math.abs(z - lastZoomShown) < 1e-6) return;
+  lastZoomShown = z;
+  clearTimeout(zoomTimer);
+  if (z <= 1.001){ chipZoom.classList.add('hide'); return; }
+  chipZoom.textContent = z.toFixed(1).replace('.', ',') + '×';
+  chipZoom.classList.remove('hide');
+  zoomTimer = setTimeout(() => chipZoom.classList.add('hide'), 1200);
 }
 
 function updateHint(){
@@ -629,16 +696,70 @@ window.addEventListener('orientationchange', scheduleLayout);
 cam.addEventListener('loadedmetadata', scheduleLayout);
 cam.addEventListener('resize', scheduleLayout);   // Kamerabild ändert Maße (z. B. beim Drehen)
 
-/* ================= Hilfslinien ================= */
-const guideSvg = $('guideSvg'), gPhoto = $('gPhoto');
-const gridShadow = $('gridShadow'), gridLine = $('gridLine');
-const horShadow = $('horShadow'), horLine = $('horLine'), horLbl = $('horLbl');
+/* ================= Hilfslinien und Perspektive ================= */
+const guideSvg = $('guideSvg'), gridLine = $('gridLine'), horLine = $('horLine');
 const handlesG = $('handles'), hMid = $('hMid'), hEndA = $('hEndA'), hEndB = $('hEndB');
-const linesPanel = $('linesPanel');
-let gridKey = '';
-const HANDLE_DIST = 90;      // Abstand der Endgriffe vom Mittelgriff (Bildschirm-px)
+const cornerG = $('cornerHandles');
+const cLinks = [...cornerG.querySelectorAll('line')], cDots = [...cornerG.querySelectorAll('circle')];
+const modePanel = $('modePanel');
+let gridSegs = [], gridKey = '';
+const HANDLE_DIST = 90;      // Abstand der Horizont-Endgriffe vom Mittelgriff (Bildschirm-px)
 const HANDLE_HIT = 26;       // Greif-Radius (≈ 52 px Fläche)
+const CORNER_OFF = 36;       // Eckgriffe so weit diagonal nach außen versetzt (px)
+const ID3 = [1,0,0, 0,1,0, 0,0,1];
 
+/* ---------- 3×3-Matrizen (zeilenweise) ---------- */
+function m3mul(A, B){
+  const r = new Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++)
+    r[i*3+j] = A[i*3] * B[j] + A[i*3+1] * B[3+j] + A[i*3+2] * B[6+j];
+  return r;
+}
+function m3inv(m){
+  const [a,b,c,d,e,f,g,h,i] = m;
+  const A = e*i - f*h, B = -(d*i - f*g), C = d*h - e*g, det = a*A + b*B + c*C;
+  if (!isFinite(det) || Math.abs(det) < 1e-14) return null;
+  return [A/det, -(b*i - c*h)/det, (b*f - c*e)/det,
+          B/det,  (a*i - c*g)/det, -(a*f - c*d)/det,
+          C/det, -(a*h - b*g)/det,  (a*e - b*d)/det];
+}
+// Punkt abbilden (mit Perspektiv-Division); null, wenn der Punkt "hinter" der Abbildung liegt
+function m3apply(m, x, y){
+  const w = m[6]*x + m[7]*y + m[8];
+  if (!(w > 1e-9)) return null;
+  return { x: (m[0]*x + m[1]*y + m[2]) / w, y: (m[3]*x + m[4]*y + m[5]) / w };
+}
+// Vorzeichen so wählen, dass ein Referenzpunkt w > 0 hat
+function m3orient(m, x, y){
+  if (!m) return null;
+  return (m[6]*x + m[7]*y + m[8]) < 0 ? m.map(v => -v) : m;
+}
+// Homographie aus 4 Punktpaaren (lineares Gleichungssystem 8×8, Gauß mit Pivotsuche)
+function solveHomography(src, dst){
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++){
+    const [x, y] = src[i], [X, Y] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -x*X, -y*X]); b.push(X);
+    A.push([0, 0, 0, x, y, 1, -x*Y, -y*Y]); b.push(Y);
+  }
+  for (let c = 0; c < 8; c++){
+    let piv = c;
+    for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+    if (Math.abs(A[piv][c]) < 1e-12) return null;
+    [A[c], A[piv]] = [A[piv], A[c]]; [b[c], b[piv]] = [b[piv], b[c]];
+    for (let r = 0; r < 8; r++){
+      if (r === c) continue;
+      const f = A[r][c] / A[c][c];
+      if (!f) continue;
+      for (let k = c; k < 8; k++) A[r][k] -= f * A[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  const h = b.map((v, i) => v / A[i][i]);
+  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+}
+
+/* ---------- Foto-Fläche und Perspektive ---------- */
 // Fotofläche in "passt hinein"-Größe (ohne Foto: gedachte Fläche = Papier)
 function photoFrame(){
   let fw = P.w, fh = P.h;
@@ -649,89 +770,182 @@ function photoFrame(){
   const s0 = Math.max(1e-6, Math.min(fw, fh));
   return { s0, aw: fw / s0, ah: fh / s0 };   // aw/ah = Seitenlängen in Einheiten der kurzen Seite
 }
-// Abbildung Foto-Einheiten -> Bildschirm: Bildschirm = T + s × (Papierursprung + Fotomitte + R·k·(a,b))
-function guideMatrix(){
+function rectCorners(F){ const hw = F.aw / 2, hh = F.ah / 2; return [[-hw,-hh],[hw,-hh],[hw,hh],[-hw,hh]]; }
+function quadFrom(F, corners){ return rectCorners(F).map((c, i) => [c[0] + corners[i][0], c[1] + corners[i][1]]); }
+// Gültig = konvex und nicht überschlagen (alle Kreuzprodukte positiv wie beim Rechteck)
+function quadValid(Q){
+  for (let i = 0; i < 4; i++){
+    const a = Q[i], b = Q[(i+1) % 4], c = Q[(i+2) % 4];
+    const cr = (b[0]-a[0]) * (c[1]-b[1]) - (b[1]-a[1]) * (c[0]-b[0]);
+    if (!(cr > 1e-3)) return false;
+  }
+  return true;
+}
+const isRect = cs => cs.every(c => c[0] === 0 && c[1] === 0);
+// Perspektive in Foto-Einheiten: Rechteck -> Viereck
+function perspHomography(F){
+  const cs = settings.photo.corners;
+  if (isRect(cs)) return ID3;
+  const Q = quadFrom(F, cs);
+  if (!quadValid(Q)) return ID3;
+  return solveHomography(rectCorners(F), Q) || ID3;
+}
+// #photo: Bildpixel -> Pixel der Foto-Ebene (Mitte der Ebene = Fotomitte) als matrix3d
+function applyPhotoPerspective(){
+  if (!photo.naturalWidth || !P.w){ photo.style.transform = ''; return; }
+  const F = photoFrame();
+  if (!isRect(settings.photo.corners) && !quadValid(quadFrom(F, settings.photo.corners)))
+    settings.photo.corners = [[0,0],[0,0],[0,0],[0,0]];          // ungültige gespeicherte Ecken verwerfen
+  const fw = F.aw * F.s0, fh = F.ah * F.s0;
+  const toUnits = [1/F.s0, 0, -fw/2/F.s0,  0, 1/F.s0, -fh/2/F.s0,  0, 0, 1];
+  const toLayer = [F.s0, 0, P.w/2,  0, F.s0, P.h/2,  0, 0, 1];
+  const L = m3mul(m3mul(toLayer, perspHomography(F)), toUnits);
+  photo.style.transform = `matrix3d(${L[0]},${L[3]},0,${L[6]},${L[1]},${L[4]},0,${L[7]},0,0,1,0,${L[2]},${L[5]},0,${L[8]})`;
+}
+// Gesamte Abbildung Foto-Einheiten -> Bildschirm und zurück
+function computeGeom(){
   const p = settings.photo, F = photoFrame();
+  const Hu = perspHomography(F);
   const k = p.scale * F.s0, r = p.rotation * Math.PI / 180;
+  const cs = Math.cos(r) * k * V.s, sn = Math.sin(r) * k * V.s;
   const cx = P.left + P.w / 2 + p.x * P.w, cy = P.top + P.h / 2 + p.y * P.h;
-  const c = Math.cos(r) * k * V.s, sn = Math.sin(r) * k * V.s;
-  // Matrix [a c e; b d f] im SVG-Sinne
-  return { a: c, b: sn, c: -sn, d: c, e: V.tx + V.s * cx, f: V.ty + V.s * cy, F };
+  const A = [cs, -sn, V.tx + V.s * cx,  sn, cs, V.ty + V.s * cy,  0, 0, 1];   // Lage + Ansicht (ohne Perspektive)
+  const Full = m3mul(A, Hu);
+  const c0 = m3apply(Full, 0, 0) || { x: A[2], y: A[5] };
+  return { F, Hu, A, Ainv: m3inv(A), Full, FullInv: m3orient(m3inv(Full), c0.x, c0.y) };
 }
-function photoToScreen(M, u, v){ return { x: M.a * u + M.c * v + M.e, y: M.b * u + M.d * v + M.f }; }
-function screenToPhoto(M, x, y){
-  const det = M.a * M.d - M.b * M.c, dx = x - M.e, dy = y - M.f;
-  return { u: ( M.d * dx - M.c * dy) / det, v: (-M.b * dx + M.a * dy) / det };
-}
-// Raster nur neu aufbauen, wenn sich Felderzahl oder Seitenverhältnis ändern
+
+/* ---------- Raster ---------- */
+// Liniensegmente in Foto-Einheiten; nur neu, wenn sich Felderzahl oder Seitenverhältnis ändern
 function buildGrid(F){
   const n = settings.guides.grid.n, c = 1 / n, odd = n % 2 === 1;
   const key = n + '|' + F.aw.toFixed(5) + '|' + F.ah.toFixed(5);
   if (key === gridKey) return;
   gridKey = key;
-  const pos = half => {                          // Linienpositionen entlang einer Achse
+  const pos = half => {
     const out = [-half, half];
-    for (let k = odd ? 0.5 : 0; k * c < half - 1e-6; k++){
-      out.push(k * c); if (k !== 0) out.push(-k * c);
-    }
+    for (let k = odd ? 0.5 : 0; k * c < half - 1e-6; k++){ out.push(k * c); if (k !== 0) out.push(-k * c); }
     return [...new Set(out.map(x => +x.toFixed(6)))].sort((a, b) => a - b);
   };
   const hw = F.aw / 2, hh = F.ah / 2;
-  let d = '';
-  for (const x of pos(hw)) d += `M${x} ${-hh}L${x} ${hh}`;
-  for (const y of pos(hh)) d += `M${-hw} ${y}L${hw} ${y}`;
-  gridShadow.setAttribute('d', d); gridLine.setAttribute('d', d);
+  gridSegs = [];
+  for (const x of pos(hw)) gridSegs.push([x, -hh, x, hh]);      // senkrechte (links -> rechts)
+  for (const y of pos(hh)) gridSegs.push([-hw, y, hw, y]);      // waagrechte (oben -> unten)
 }
 function applyGridStyle(){
-  const g = settings.guides.grid, w = g.bold ? 2.2 : 1;
-  gridLine.setAttribute('stroke', GRID_COLORS[g.color]);
-  gridLine.setAttribute('stroke-width', w);
-  gridShadow.setAttribute('stroke', g.color === 'black' ? 'rgba(255,255,255,.55)' : 'rgba(0,0,0,.55)');
-  gridShadow.setAttribute('stroke-width', w + 2);
-  gridKey = '';                                 // Felderzahl kann sich geändert haben
+  const g = settings.guides.grid;
+  gridLine.setAttribute('stroke', GRID_COLORS[g.color] || '#000');
+  gridLine.setAttribute('stroke-width', g.bold ? 2.2 : 1);
+  gridKey = '';
 }
+
+/* ---------- Horizont ---------- */
 // Horizont in Bildschirm-Koordinaten: Punkt m (Lot vom Bildschirmmittelpunkt) + Richtung
-function horizonScreen(M){
-  const h = settings.guides.horizon;
-  const p0 = photoToScreen(M, h.u, h.v);
-  const ang = (h.angle + settings.photo.rotation) * Math.PI / 180;
-  const dx = Math.cos(ang), dy = Math.sin(ang);
-  const sx = stage.clientWidth / 2, sy = stage.clientHeight / 2;
-  const t = (sx - p0.x) * dx + (sy - p0.y) * dy;
-  return { m: { x: p0.x + t * dx, y: p0.y + t * dy }, dx, dy, ang };
+function horizonScreen(g){
+  const h = settings.guides.horizon, a = h.angle * Math.PI / 180, dx = Math.cos(a), dy = Math.sin(a);
+  const t = -(h.u * dx + h.v * dy), fu = h.u + t * dx, fv = h.v + t * dy;   // Fußpunkt nahe der Fotomitte
+  const p0 = m3apply(g.Full, fu - dx * 0.25, fv - dy * 0.25), p1 = m3apply(g.Full, fu + dx * 0.25, fv + dy * 0.25);
+  if (!p0 || !p1) return null;
+  let sx = p1.x - p0.x, sy = p1.y - p0.y; const l = Math.hypot(sx, sy);
+  if (l < 1e-9) return null;
+  sx /= l; sy /= l;
+  const cx = stage.clientWidth / 2, cy = stage.clientHeight / 2, tt = (cx - p0.x) * sx + (cy - p0.y) * sy;
+  return { m: { x: p0.x + tt * sx, y: p0.y + tt * sy }, dx: sx, dy: sy };
 }
+// Linie aus Bildschirmpunkt + Richtung zurück in Foto-Einheiten speichern
+function setHorizonFromScreen(g, m, dx, dy){
+  if (!g.FullInv) return false;
+  const a = m3apply(g.FullInv, m.x, m.y), b = m3apply(g.FullInv, m.x + dx * 40, m.y + dy * 40);
+  if (!a || !b) return false;
+  const h = settings.guides.horizon, cl = v => Math.max(-100, Math.min(100, v));
+  h.u = cl(a.x); h.v = cl(a.y);
+  const deg = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
+  h.angle = ((deg % 360) + 540) % 360 - 180;
+  return true;
+}
+function snapHorizon(screenDeg){
+  const d = ((screenDeg % 180) + 270) % 180 - 90;   // auf (-90, 90] bringen
+  return Math.abs(d) <= HOR_SNAP_DEG ? screenDeg - d : screenDeg;
+}
+
+/* ---------- Zeichnen aller Hilfslinien und Griffe ---------- */
+function cornerScreens(g){
+  return quadFrom(g.F, settings.photo.corners).map(q => m3apply(g.A, q[0], q[1]));
+}
+// Eckgriffe: diagonal nach außen versetzt, aber immer erreichbar (im Bildschirm, nicht unter Leiste/Einstellfeld)
+function cornerHandlePos(S){
+  const cx = (S[0].x + S[1].x + S[2].x + S[3].x) / 4, cy = (S[0].y + S[1].y + S[2].y + S[3].y) / 4;
+  const M = 24, sw = stage.clientWidth, sh = stage.clientHeight, sr = stage.getBoundingClientRect();
+  const obst = [];
+  for (const el of [bar, modePanel, opPop, moreMenu, $('barToggle')]){
+    if (!el || getComputedStyle(el).display === 'none' || (el === bar && bar.classList.contains('hidden'))) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width && r.height) obst.push({ l: r.left - sr.left - M, t: r.top - sr.top - M, r: r.right - sr.left + M, b: r.bottom - sr.top + M });
+  }
+  return S.map(p => {
+    const dx = p.x - cx, dy = p.y - cy, l = Math.hypot(dx, dy) || 1;
+    let x = p.x + dx / l * CORNER_OFF, y = p.y + dy / l * CORNER_OFF;
+    x = Math.min(sw - M, Math.max(M, x)); y = Math.min(sh - M, Math.max(M, y));
+    const inside = (x, y) => obst.some(o => x > o.l && x < o.r && y > o.t && y < o.b);
+    if (inside(x, y)){
+      // nächste freie Stelle an einer Hinderniskante suchen (innerhalb des Bildschirms)
+      const cand = [];
+      for (const o of obst){
+        cand.push({ x, y: o.t }, { x, y: o.b }, { x: o.l, y }, { x: o.r, y });
+      }
+      const ok = cand.filter(c => c.x >= M && c.x <= sw - M && c.y >= M && c.y <= sh - M && !inside(c.x, c.y));
+      if (ok.length){
+        ok.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y));
+        x = ok[0].x; y = ok[0].y;
+      }
+    }
+    return { x, y };
+  });
+}
+const f2 = v => Math.round(v * 100) / 100;
 function updateGuides(){
   if (!P.w) return;
-  const G = settings.guides, M = guideMatrix();
-  // Raster
-  gPhoto.style.display = G.grid.on ? '' : 'none';
+  const G = settings.guides, g = computeGeom();
+  // Raster: Endpunkte abbilden, Linien gerade verbinden (bleiben unter Perspektive gerade)
+  gridLine.style.display = G.grid.on ? '' : 'none';
   if (G.grid.on){
-    buildGrid(M.F);
-    gPhoto.setAttribute('transform', `matrix(${M.a} ${M.b} ${M.c} ${M.d} ${M.e} ${M.f})`);
+    buildGrid(g.F);
+    let d = '';
+    for (const s of gridSegs){
+      const a = m3apply(g.Full, s[0], s[1]), b = m3apply(g.Full, s[2], s[3]);
+      if (a && b) d += `M${f2(a.x)} ${f2(a.y)}L${f2(b.x)} ${f2(b.y)}`;
+    }
+    gridLine.setAttribute('d', d);
   }
   // Horizont
-  const showH = G.horizon.on;
-  for (const el of [horShadow, horLine, horLbl]) el.style.display = showH ? '' : 'none';
-  handlesG.style.display = (showH && settings.ui.mode === 'lines' && !settings.ui.locked) ? '' : 'none';
-  if (!showH) return;
-  const H = horizonScreen(M), L = 4 * Math.max(stage.clientWidth, stage.clientHeight);
-  const d = `M${H.m.x - H.dx * L} ${H.m.y - H.dy * L}L${H.m.x + H.dx * L} ${H.m.y + H.dy * L}`;
-  horShadow.setAttribute('d', d); horLine.setAttribute('d', d);
-  // Beschriftung neben dem Mittelpunkt, immer lesbar (nicht kopfüber)
-  let deg = H.ang * 180 / Math.PI; deg = ((deg % 360) + 540) % 360 - 180;
-  const flip = (deg > 90 || deg < -90) ? -1 : 1;
-  const lx = H.m.x + H.dx * 34 * flip + H.dy * 6, ly = H.m.y + H.dy * 34 * flip - H.dx * 6;
-  horLbl.setAttribute('x', lx); horLbl.setAttribute('y', ly);
-  horLbl.setAttribute('transform', `rotate(${flip < 0 ? deg + 180 : deg} ${lx} ${ly})`);
-  horLbl.setAttribute('dy', '-4');
-  hMid.setAttribute('cx', H.m.x); hMid.setAttribute('cy', H.m.y);
-  hEndA.setAttribute('cx', H.m.x - H.dx * HANDLE_DIST); hEndA.setAttribute('cy', H.m.y - H.dy * HANDLE_DIST);
-  hEndB.setAttribute('cx', H.m.x + H.dx * HANDLE_DIST); hEndB.setAttribute('cy', H.m.y + H.dy * HANDLE_DIST);
+  const H = G.horizon.on ? horizonScreen(g) : null;
+  horLine.style.display = H ? '' : 'none';
+  handlesG.style.display = (H && settings.ui.mode === 'lines' && !settings.ui.locked) ? '' : 'none';
+  if (H){
+    const L = 4 * Math.max(stage.clientWidth, stage.clientHeight);
+    horLine.setAttribute('d', `M${f2(H.m.x - H.dx * L)} ${f2(H.m.y - H.dy * L)}L${f2(H.m.x + H.dx * L)} ${f2(H.m.y + H.dy * L)}`);
+    hMid.setAttribute('cx', H.m.x); hMid.setAttribute('cy', H.m.y);
+    hEndA.setAttribute('cx', H.m.x - H.dx * HANDLE_DIST); hEndA.setAttribute('cy', H.m.y - H.dy * HANDLE_DIST);
+    hEndB.setAttribute('cx', H.m.x + H.dx * HANDLE_DIST); hEndB.setAttribute('cy', H.m.y + H.dy * HANDLE_DIST);
+  }
+  // Eckgriffe (Perspektive)
+  const showC = settings.ui.mode === 'align' && settings.ui.perspOn && !settings.ui.locked && !!photo.naturalWidth;
+  cornerG.style.display = showC ? '' : 'none';
+  if (showC){
+    const S = cornerScreens(g), Hp = cornerHandlePos(S);
+    for (let i = 0; i < 4; i++){
+      cLinks[i].setAttribute('x1', S[i].x); cLinks[i].setAttribute('y1', S[i].y);
+      cLinks[i].setAttribute('x2', Hp[i].x); cLinks[i].setAttribute('y2', Hp[i].y);
+      cDots[i].setAttribute('cx', Hp[i].x); cDots[i].setAttribute('cy', Hp[i].y);
+    }
+  }
 }
-// Griff unter dem Finger finden
+
+/* ---------- Griffe treffen und ziehen ---------- */
 function hitHandle(pt){
   if (!settings.guides.horizon.on) return null;
-  const H = horizonScreen(guideMatrix());
+  const H = horizonScreen(computeGeom());
+  if (!H) return null;
   const cand = [
     { type: 'mid', x: H.m.x, y: H.m.y },
     { type: 'end', sign: -1, x: H.m.x - H.dx * HANDLE_DIST, y: H.m.y - H.dy * HANDLE_DIST },
@@ -742,59 +956,91 @@ function hitHandle(pt){
   if (!best) return null;
   return { type: best.type, sign: best.sign || 0, last: { x: pt.x, y: pt.y }, pivot: { x: H.m.x, y: H.m.y } };
 }
-function snapHorizon(screenDeg){
-  let d = ((screenDeg % 180) + 270) % 180 - 90;   // auf (-90, 90] bringen
-  return Math.abs(d) <= HOR_SNAP_DEG ? screenDeg - d : screenDeg;
-}
 function moveLine(drag, pt){
-  const h = settings.guides.horizon, M = guideMatrix();
+  const g = computeGeom(), H = horizonScreen(g);
+  if (!H) return;
   if (drag.type === 'mid'){
-    const p0 = photoToScreen(M, h.u, h.v);
-    const q = screenToPhoto(M, p0.x + pt.x - drag.last.x, p0.y + pt.y - drag.last.y);
-    h.u = q.u; h.v = q.v;
+    setHorizonFromScreen(g, { x: H.m.x + pt.x - drag.last.x, y: H.m.y + pt.y - drag.last.y }, H.dx, H.dy);
     drag.last = { x: pt.x, y: pt.y };
   } else {
-    // Neigen um den Mittelgriff
+    // Neigen um den Mittelgriff (Stelle beim Anfassen)
     const dx = (pt.x - drag.pivot.x) * drag.sign, dy = (pt.y - drag.pivot.y) * drag.sign;
     if (Math.hypot(dx, dy) < 12) return;
-    const screenDeg = snapHorizon(Math.atan2(dy, dx) * 180 / Math.PI);
-    const q = screenToPhoto(M, drag.pivot.x, drag.pivot.y);
-    h.u = q.u; h.v = q.v;
-    let a = screenDeg - settings.photo.rotation;
-    h.angle = ((a % 360) + 540) % 360 - 180;
+    const a = snapHorizon(Math.atan2(dy, dx) * 180 / Math.PI) * Math.PI / 180;
+    setHorizonFromScreen(g, drag.pivot, Math.cos(a), Math.sin(a));
   }
   updateGuides();
 }
+function hitCorner(pt){
+  if (!(settings.ui.perspOn && photo.naturalWidth)) return null;
+  const g = computeGeom(), S = cornerScreens(g), Hp = cornerHandlePos(S);
+  let best = -1, bd = HANDLE_HIT;
+  for (let i = 0; i < 4; i++){ const d = Math.hypot(pt.x - Hp[i].x, pt.y - Hp[i].y); if (d <= bd){ bd = d; best = i; } }
+  if (best < 0) return null;
+  return { i: best, grab: { x: pt.x - S[best].x, y: pt.y - S[best].y } };   // Abstand Finger -> Ecke bleibt fest
+}
+function moveCorner(drag, pt){
+  const g = computeGeom();
+  if (!g.Ainv) return;
+  const q = m3apply(g.Ainv, pt.x - drag.grab.x, pt.y - drag.grab.y);
+  if (!q) return;
+  const R = rectCorners(g.F)[drag.i];
+  const next = settings.photo.corners.map(c => [c[0], c[1]]);
+  next[drag.i] = [Math.max(-10, Math.min(10, q.x - R[0])), Math.max(-10, Math.min(10, q.y - R[1]))];
+  if (!quadValid(quadFrom(g.F, next))) return;      // ungültig: an der letzten gültigen Stelle bleiben
+  settings.photo.corners = next;
+  applyPhotoTransform();
+  $('pPerspReset').disabled = false;
+}
 
-/* ---------- Einstellfeld im Modus "Linien" ---------- */
+/* ---------- Einstellfeld (Ausrichten und Linien) ---------- */
 function applyLinesPanel(){
-  const G = settings.guides;
-  const show = settings.ui.mode === 'lines' && settings.ui.barVisible;
-  linesPanel.classList.toggle('show', show);
+  const G = settings.guides, m = settings.ui.mode;
+  const hasSet = (m === 'lines' || m === 'align');
+  const show = hasSet && settings.ui.barVisible && panelOpen;
+  modePanel.classList.toggle('show', show);
+  setBtn.disabled = !hasSet;
+  setBtn.classList.toggle('on', show);
+  modePanel.querySelectorAll('.pAlign').forEach(el => el.style.display = m === 'align' ? '' : 'none');
+  modePanel.querySelectorAll('.pLines').forEach(el => el.style.display = m === 'lines' ? '' : 'none');
   const tog = (el, on) => { el.classList.toggle('on', on); el.setAttribute('aria-pressed', on); };
   tog($('gGrid'), G.grid.on); tog($('gBold'), G.grid.bold); tog($('gHor'), G.horizon.on);
-  $('gN').textContent = G.grid.n + ' Felder';
+  tog($('pPersp'), settings.ui.perspOn);
+  $('pPerspReset').disabled = isRect(settings.photo.corners);
+  $('gN').textContent = G.grid.n;
   $('gMinus').disabled = G.grid.n <= GRID_N_MIN; $('gPlus').disabled = G.grid.n >= GRID_N_MAX;
-  linesPanel.querySelectorAll('.sw').forEach(b => b.classList.toggle('on', b.dataset.c === G.grid.color));
+  modePanel.querySelectorAll('.sw').forEach(b => b.classList.toggle('on', b.dataset.c === G.grid.color));
   $('gLevel').disabled = !G.horizon.on;
-  if (show) positionLinesPanel();
+  if (show) placePop(modePanel, setBtn);
 }
-function positionLinesPanel(){
-  const land = matchMedia('(orientation: landscape)').matches;
-  linesPanel.style.bottom = land ? '' : (bar.offsetHeight + 8) + 'px';
+// Feld neben der Leiste auf Höhe des auslösenden Symbols, im Bildschirm gehalten
+function placePop(pop, btn){
+  const r = btn.getBoundingClientRect(), h = pop.offsetHeight, H = window.innerHeight;
+  const top = Math.max(8, Math.min(H - h - 8, r.top + r.height / 2 - h / 2));
+  pop.style.top = top + 'px';
 }
 function guidesChanged(){ applyGridStyle(); applyLinesPanel(); updateGuides(); scheduleSave(); }
+let panelOpen = false;   // Moduseinstellungen: Standard zu (nicht gespeichert)
+setBtn.addEventListener('click', () => { closePops(); panelOpen = !panelOpen; applyLinesPanel(); updateGuides(); });
 $('gGrid').addEventListener('click', () => { settings.guides.grid.on = !settings.guides.grid.on; guidesChanged(); });
 $('gBold').addEventListener('click', () => { settings.guides.grid.bold = !settings.guides.grid.bold; guidesChanged(); });
 $('gMinus').addEventListener('click', () => { settings.guides.grid.n = Math.max(GRID_N_MIN, settings.guides.grid.n - 1); guidesChanged(); });
 $('gPlus').addEventListener('click', () => { settings.guides.grid.n = Math.min(GRID_N_MAX, settings.guides.grid.n + 1); guidesChanged(); });
-linesPanel.querySelectorAll('.sw').forEach(b => b.addEventListener('click', () => { settings.guides.grid.color = b.dataset.c; guidesChanged(); }));
+modePanel.querySelectorAll('.sw').forEach(b => b.addEventListener('click', () => { settings.guides.grid.color = b.dataset.c; guidesChanged(); }));
 $('gHor').addEventListener('click', () => { settings.guides.horizon.on = !settings.guides.horizon.on; guidesChanged(); });
 $('gLevel').addEventListener('click', () => {
-  // waagrecht auf dem Papier: Winkel im Foto = −Fotodrehung
-  const a = -settings.photo.rotation;
-  settings.guides.horizon.angle = ((a % 360) + 540) % 360 - 180;
+  // waagrecht auf dem Bildschirm/Papier, durch den aktuellen Mittelpunkt
+  const g = computeGeom(), H = horizonScreen(g);
+  if (!H || !setHorizonFromScreen(g, H.m, 1, 0)){
+    const a = -settings.photo.rotation;
+    Object.assign(settings.guides.horizon, { u: 0, v: 0, angle: ((a % 360) + 540) % 360 - 180 });
+  }
   guidesChanged();
+});
+$('pPersp').addEventListener('click', () => { settings.ui.perspOn = !settings.ui.perspOn; applyLinesPanel(); updateGuides(); scheduleSave(); });
+$('pPerspReset').addEventListener('click', () => {
+  settings.photo.corners = [[0,0],[0,0],[0,0],[0,0]];
+  applyPhotoTransform(); applyLinesPanel(); scheduleSave();
 });
 
 /* ================= Gesten ================= */
@@ -838,7 +1084,11 @@ function applyMove(prev, cur){
   const ids = [...cur.keys()].filter(id => prev.has(id)).slice(0, 2);
   if (!ids.length) return;
   const m = settings.ui.mode;
-  if (m === 'align') moveAlign(ids, prev, cur);
+  if (m === 'align'){
+    if (ids.length === 2){ if (gesture) gesture.cornerDrag = null; moveAlign(ids, prev, cur); }
+    else if (gesture && gesture.cornerDrag) moveCorner(gesture.cornerDrag, cur.get(ids[0]));
+    else moveAlign(ids, prev, cur);
+  }
   else if (m === 'draw') moveDraw(ids, prev, cur);
   else {                                         // Linien: 2 Finger = Ansicht, 1 Finger = Griff
     if (ids.length === 2){ if (gesture) gesture.lineDrag = null; moveDraw(ids, prev, cur); }
@@ -914,6 +1164,9 @@ stage.addEventListener('pointerdown', e => {
   if (settings.ui.mode === 'lines'){
     gesture.lineDrag = (pointers.size === 1) ? hitHandle(stagePoint(e)) : null;
   }
+  if (settings.ui.mode === 'align'){
+    gesture.cornerDrag = (pointers.size === 1 && settings.ui.perspOn) ? hitCorner(stagePoint(e)) : null;
+  }
   if (pointers.size === 1) tapInfo = { t: performance.now(), p: stagePoint(e), moved: false };
   else tapInfo = null;
 });
@@ -926,6 +1179,7 @@ stage.addEventListener('pointermove', e => {
   if (tapInfo && Math.hypot(pt.x - tapInfo.p.x, pt.y - tapInfo.p.y) > 10) tapInfo.moved = true;
   applyMove(prev, pointers);
 });
+let singleTapTimer = null, lastPopClose = 0;
 function pointerEnd(e){
   if (!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
@@ -934,9 +1188,20 @@ function pointerEnd(e){
       performance.now() - tapInfo.t < 300){
     const now = performance.now();
     if (lastTap && now - lastTap.t < 350 && Math.hypot(tapInfo.p.x - lastTap.p.x, tapInfo.p.y - lastTap.p.y) < 40){
+      clearTimeout(singleTapTimer);      // war ein Doppeltipp: Bedienung nicht umschalten
       if (settings.ui.mode === 'draw' && !settings.ui.locked) resetView();
       lastTap = null;
-    } else lastTap = { t: now, p: tapInfo.p };
+    } else {
+      lastTap = { t: now, p: tapInfo.p };
+      // Einfacher Tipp im Zeichnen-Modus: Bedienung aus-/einblenden (kurz warten, ob ein zweiter Tipp folgt)
+      if (settings.ui.mode === 'draw' && !settings.ui.locked && now - lastPopClose > 600){
+        clearTimeout(singleTapTimer);
+        singleTapTimer = setTimeout(() => {
+          if (settings.ui.mode !== 'draw') return;
+          settings.ui.barVisible = !settings.ui.barVisible; applyBar(); scheduleSave();
+        }, 360);
+      }
+    }
   }
   if (pointers.size === 0){ tapInfo = null; endGesture(); }
 }
@@ -947,23 +1212,22 @@ stage.addEventListener('pointercancel', pointerEnd);
 function applyUi(){
   const m = settings.ui.mode, align = m === 'align';
   for (const [btn, key] of [[modeAlign, 'align'], [modeLines, 'lines'], [modeDraw, 'draw']]){
-    btn.classList.toggle('active', m === key); btn.setAttribute('aria-pressed', m === key);
+    btn.classList.toggle('on', m === key); btn.setAttribute('aria-pressed', m === key);
   }
-  chipMode.textContent = align ? 'Ausrichten' : m === 'lines' ? 'Linien' : 'Zeichnen';
   applyLinesPanel();
   updateGuides();
   resetBtn.disabled = !align;
   const L = settings.ui.locked;
-  lockBtn.classList.toggle('locked', L);
+  lockBtn.classList.toggle('on', L);
   lockBtn.setAttribute('aria-pressed', L);
-  $('lockLbl').textContent = L ? 'Gesperrt' : 'Sperre';
-  $('lockPath').setAttribute('d', L ? 'M8 11V8a4 4 0 0 1 8 0v3' : 'M8 11V8a4 4 0 0 1 7.5-2');
-  chipLock.classList.toggle('hide', !L);
+  lockBtn.dataset.tip = L ? 'Gesperrt' : 'Entsperrt';
+  $('lockPath').setAttribute('d', L ? 'M8.5 11V8a3.5 3.5 0 0 1 7 0v3' : 'M8.5 11V8a3.5 3.5 0 0 1 6.6-1.6');
   stage.classList.toggle('locked', L);
 }
 function setMode(m){
   settings.ui.mode = m;
-  pointers.clear(); endGesture(); lastTap = null;
+  pointers.clear(); endGesture(); lastTap = null; clearTimeout(singleTapTimer);
+  panelOpen = false;                     // Einstellungsfeld beim Moduswechsel schließen
   applyUi();
   scheduleSave();
 }
@@ -976,8 +1240,9 @@ lockBtn.addEventListener('click', () => {
   applyUi();
 });
 resetBtn.addEventListener('click', () => {
-  Object.assign(settings.photo, { x: 0, y: 0, scale: 1, rotation: 0 });
+  Object.assign(settings.photo, { x: 0, y: 0, scale: 1, rotation: 0, corners: [[0,0],[0,0],[0,0],[0,0]] });
   applyPhotoTransform();
+  applyLinesPanel();
   scheduleSave();
 });
 
@@ -1009,7 +1274,7 @@ fsBtn.addEventListener('click', async () => {
   } catch(e){ showMsg('Vollbild ist hier nicht möglich.', true); }
 });
 document.addEventListener('fullscreenchange', () => {
-  $('fsLbl').textContent = isFs() ? 'Beenden' : 'Vollbild';
+  $('fsLbl').textContent = isFs() ? 'Vollbild beenden' : 'Vollbild';
   $('fsPath').setAttribute('d', isFs() ? 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5'
                                         : 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5');
   scheduleLayout();
@@ -1033,6 +1298,7 @@ function stopCamera(){
   cam.srcObject = null;
   cam.style.display = 'none';
   camBtn.classList.remove('on');
+  $('camLbl').textContent = 'Kamera starten';
   releaseWakeLock();
   layout(); updateHint();
 }
@@ -1051,7 +1317,7 @@ async function startCamera(opts){
     return;
   }
   stopCamera();
-  camBtn.disabled = true; $('camLbl').textContent = 'Starte …';
+  camBtn.disabled = true; $('camLbl').textContent = 'Kamera startet …';
 
   // Reihenfolge: Rückkamera mit hoher Auflösung → irgendeine Kamera hoch → irgendeine Kamera
   const res = { width: { ideal: 1920 }, height: { ideal: 1080 } };
@@ -1069,7 +1335,7 @@ async function startCamera(opts){
       if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) break;  // kein Sinn weiterzuprobieren
     }
   }
-  camBtn.disabled = false; $('camLbl').textContent = 'Kamera';
+  camBtn.disabled = false; $('camLbl').textContent = 'Kamera starten';
   if (!s){ if (!silent) showMsg(cameraErrorText(lastErr), true); return; }
 
   stream = s;
@@ -1081,6 +1347,7 @@ async function startCamera(opts){
   cam.srcObject = stream;
   cam.style.display = 'block';
   camBtn.classList.add('on');
+  $('camLbl').textContent = 'Kamera neu starten';
   try { await cam.play(); } catch(e){ /* autoplay ist muted; Fehler hier ignorieren */ }
   updateHint(); scheduleLayout();
   requestWakeLock();
@@ -1181,10 +1448,60 @@ opacity.addEventListener('input', () => { setOpacity(+opacity.value); scheduleSa
 /* ================= Leiste ein/aus ================= */
 function applyBar(){
   bar.classList.toggle('hidden', !settings.ui.barVisible);
-  $('barToggle').textContent = settings.ui.barVisible ? '✕' : '☰';
+  $('barToggle').classList.toggle('show', !settings.ui.barVisible);
+  if (!settings.ui.barVisible) closePops();
   applyLinesPanel();
 }
 $('barToggle').addEventListener('click', () => { settings.ui.barVisible = !settings.ui.barVisible; applyBar(); scheduleSave(); });
+
+/* ================= Leiste: Hinweise, Deckkraft, Mehr-Menü ================= */
+let tipTimer = null;
+function showTip(btn){
+  const t = btn.dataset.tip; if (!t) return;
+  railTip.textContent = t;
+  railTip.classList.add('show');
+  const r = btn.getBoundingClientRect();
+  railTip.style.top = (r.top + r.height / 2 - railTip.offsetHeight / 2) + 'px';
+  clearTimeout(tipTimer);
+  tipTimer = setTimeout(() => railTip.classList.remove('show'), 1000);
+}
+bar.querySelectorAll('.ic').forEach(b => b.addEventListener('click', () => {
+  if (b === opBtn || b === moreBtn || b === setBtn) return;   // diese öffnen ein eigenes Feld
+  setTimeout(() => showTip(b), 0);
+}));
+let opTimer = null;
+function armOpTimer(){ clearTimeout(opTimer); opTimer = setTimeout(() => closePop(opPop), 2500); }
+function closePop(pop){
+  pop.classList.remove('show');
+  if (pop === opPop) opBtn.classList.remove('on');
+  if (pop === moreMenu) moreBtn.classList.remove('on');
+}
+function closePops(){ closePop(opPop); closePop(moreMenu); }
+function togglePop(pop, btn){
+  const open = !pop.classList.contains('show');
+  closePops();
+  if (open){
+    pop.classList.add('show'); btn.classList.add('on'); placePop(pop, btn);
+    if (pop === opPop) armOpTimer();
+  }
+}
+opBtn.addEventListener('click', () => togglePop(opPop, opBtn));
+moreBtn.addEventListener('click', () => togglePop(moreMenu, moreBtn));
+opacity.addEventListener('input', armOpTimer);
+opacity.addEventListener('pointerdown', () => clearTimeout(opTimer));
+opacity.addEventListener('pointerup', armOpTimer);
+// Menüpunkt gewählt -> Menü schließen
+moreMenu.querySelectorAll('.mi').forEach(b => b.addEventListener('click', () => closePop(moreMenu)));
+// Tippen daneben schließt Deckkraft-Regler und Mehr-Menü
+document.addEventListener('pointerdown', e => {
+  for (const [pop, btn] of [[opPop, opBtn], [moreMenu, moreBtn]]){
+    if (pop.classList.contains('show') && !pop.contains(e.target) && !btn.contains(e.target)){ closePop(pop); lastPopClose = performance.now(); }
+  }
+}, true);
+window.addEventListener('resize', () => {
+  if (opPop.classList.contains('show')) placePop(opPop, opBtn);
+  if (moreMenu.classList.contains('show')) placePop(moreMenu, moreBtn);
+});
 
 /* ================= Info / Diagnose ================= */
 const yn = b => b ? '<span class="ja">ja</span>' : '<span class="nein">nein</span>';
@@ -1232,7 +1549,7 @@ async function renderInfo(){
   const pers = await isPersisted();
   const meta = lsGet(META_KEY);
   const drows = [
-    ['Speicher-Kennung', meta && meta.id ? '<b>' + esc(meta.id) + '</b>' : '<span class="nein">kein Speicher</span>'],
+    ['Speicher-Kennung', meta && meta.id ? esc(meta.id) : '<span class="nein">kein Speicher</span>'],
     ['Gespeichertes Foto', hasPhoto ? yn(true) + ' (' + fmtSize(rec.blob.size) + ', ' + esc(rec.w + ' × ' + rec.h) + ')' : yn(false)],
     ['Dauerhafter Speicher', pers === null ? '<span class="nein">unbekannt</span>' : yn(pers)],
     ['Einstellungen gespeichert', yn(!!lsGet(STORAGE_KEY))]
@@ -1240,7 +1557,7 @@ async function renderInfo(){
   dataBody.innerHTML = drows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
   $('photoDelBtn').disabled = !hasPhoto;
 }
-infoBtn.addEventListener('click', async () => { await renderInfo(); info.classList.add('show'); });
+infoBtn.addEventListener('click', async () => { $('infoVer').textContent = 'Version ' + APP_VERSION; await renderInfo(); info.classList.add('show'); });
 $('infoClose').addEventListener('click', () => { info.classList.remove('show'); $('confirmBox').classList.remove('show'); });
 
 // Foto entfernen (gespeichert und angezeigt)
@@ -1296,9 +1613,9 @@ const orientBtn = $('orientBtn');
 const orientSupported = !!(screen.orientation && typeof screen.orientation.lock === 'function');
 let orientLocked = false;
 function applyOrientUi(){
-  orientBtn.classList.toggle('fixed', orientLocked);
+  orientBtn.classList.toggle('on', orientLocked);
   orientBtn.setAttribute('aria-pressed', orientLocked);
-  $('orientLbl').textContent = orientLocked ? 'Fixiert' : 'Drehung';
+  $('orientLbl').textContent = orientLocked ? 'Drehung freigeben' : 'Drehung fixieren';
   orientBtn.title = orientLocked ? 'Drehung freigeben' : 'Drehung sperren';
 }
 orientBtn.addEventListener('click', async () => {
@@ -1347,7 +1664,8 @@ let installEvent = null;
 const installBtn = $('installBtn');
 function applyInstallUi(){
   installBtn.classList.toggle('show', !!installEvent);
-  infoBtn.classList.toggle('dot', !!installEvent);   // Punkt am Info-Knopf: Installation möglich
+  infoBtn.classList.toggle('dot', !!installEvent);   // Punkt: Installation möglich
+  moreBtn.classList.toggle('dot', !!installEvent);
 }
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault();          // eigenen Knopf zeigen statt Browser-Leiste

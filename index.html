@@ -2,7 +2,7 @@
 <!--
   Zeichenhilfe – Overlay und Perspektive
   Autor: Benjamin Dormoros
-  Version: siehe APP_VERSION im Skript (aktuell 0.9)
+  Version: siehe APP_VERSION im Skript (aktuell 0.10)
 
   Änderungsverlauf
   ----------------
@@ -75,6 +75,16 @@
                     1×/s. "Farbe anlernen" schaltet Marker ein. Fokus: Reihenfolge single-shot -> manual mit
                     Entfernung im erlaubten Bereich -> manual; jeder Versuch per getSettings geprüft;
                     Auflösung bleibt bei applyConstraints erhalten. Diagnose erweitert.
+  0.10 (2026-11-02) Marker-Tracking schnell und zuverlässig: pro Bild nur EIN Bildzugriff (Voll- und
+                    Fenstersuche werten denselben Puffer aus); 6 Wege (Canvas CPU / ImageBitmap / Worker mit
+                    VideoFrame, jeweils volle Spur oder kleine Zweitspur 640 px) werden je ca. 30 Bilder
+                    gemessen, auf gleiche Ergebnisse geprüft und der schnellste gespeichert ("Erkennung neu
+                    messen" in der Diagnose). Zeit je Bild als (a) holen / (b) lesen / (c) auswerten.
+                    Verankert: nur Suchfenster um die vorhergesagten Lagen, Größenfilter (0,5–2× der beim
+                    Verankern gemerkten Punktgröße), Plausibilität (jeder Punkt muss zu den 3 anderen
+                    passen), Form-/Sprungprüfung mit Bestätigung durch das nächste Bild, One-Euro-Glättung.
+                    "Farbmaske zeigen" (nicht gespeichert). Farbprüfung lichtunabhängiger (Helligkeit nur
+                    noch ≥ 25 % der angelernten, Mindest-Farbigkeit). Fokus-Code unverändert.
 
   VERSIONSNUMMER: wird NUR hier in APP_VERSION gepflegt. sw.js erhält sie über die Adresse
   (./sw.js?v=APP_VERSION) und benennt damit seinen Cache. Zusätzliche Dateien neben index.html:
@@ -151,6 +161,7 @@
   #photo{ position:absolute; left:0; top:0; transform-origin:0 0;
           max-width:none; max-height:none; display:none; opacity:.5; }
   #guides{ position:absolute; inset:0; pointer-events:none; }
+  #maskCv{ position:absolute; inset:0; width:100%; height:100%; image-rendering:pixelated; opacity:.55; pointer-events:none; display:none; }
   #hint{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
          padding:24px 80px 24px 24px; text-align:center; color:var(--muted); font-size:14px; line-height:1.5;
          pointer-events:none; }
@@ -313,6 +324,7 @@
   <div id="view">
     <div id="paper">
       <video id="cam" playsinline muted autoplay></video>
+      <canvas id="maskCv"></canvas>
       <div id="photoLayer"><img id="photo" alt="Vorlage"></div>
       <div id="guides"></div>
     </div>
@@ -418,6 +430,7 @@
     <button id="mkOn" class="pt" aria-pressed="false"><span>Marker</span><i></i></button>
     <button id="mkLearn" class="pt act" aria-pressed="false"><span>Farbe anlernen</span><b id="mkSwatch" class="mk-sw"></b></button>
     <button id="mkAnchor" class="pt" aria-pressed="false"><span id="mkAnchorLbl">Verankern</span><i></i></button>
+    <button id="mkMask" class="pt" aria-pressed="false"><span>Farbmaske zeigen</span><i></i></button>
     <div class="prow"><span class="pl">Empfindlichkeit</span>
       <button id="mkMinus" class="pb" aria-label="Weniger empfindlich">−</button><span id="mkTol" style="min-width:24px;text-align:center;color:#fff">5</span><button id="mkPlus" class="pb" aria-label="Empfindlicher">+</button>
     </div>
@@ -460,6 +473,7 @@
   <details id="diagBox">
     <summary>Diagnose ▸</summary>
     <table><tbody id="infoBody"></tbody></table>
+    <button id="perfBtn" class="btn" style="width:100%;margin-top:8px">Erkennung neu messen</button>
   </details>
   <button id="installBtn" class="btn">App installieren</button>
   <button id="infoClose" class="btn">Schließen</button>
@@ -468,7 +482,7 @@
 <script>
 'use strict';
 /* ================= Version und Einstellungen ================= */
-const APP_VERSION = '0.9';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
+const APP_VERSION = '0.10';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
 const SETTINGS_FORMAT = 1;          // Format des Einstellungsobjekts; nur abwärtskompatibel ändern
 const STORAGE_KEY = 'zeichenhilfe.settings';
 
@@ -559,8 +573,11 @@ function mergeSettings(raw){
     S.marker.color = { h: ((mc.h % 360) + 360) % 360, s: Math.min(1, Math.max(0, mc.s)), v: Math.min(1, Math.max(0, mc.v)) };
   const an = obj(mk.anchor);
   const quad4 = q => Array.isArray(q) && q.length === 4 && q.every(c => Array.isArray(c) && c.length === 2 && c.every(n => typeof n === 'number' && isFinite(n) && Math.abs(n) < 50));
-  if (an.on === true && quad4(an.ref) && quad4(an.quad))
+  if (an.on === true && quad4(an.ref) && quad4(an.quad)){
     S.marker.anchor = { on: true, ref: an.ref.map(c => c.slice()), quad: an.quad.map(c => c.slice()) };
+    if (Array.isArray(an.r) && an.r.length === 4 && an.r.every(v => typeof v === 'number' && v > 0 && v < 1) &&
+        typeof an.rPerim === 'number' && an.rPerim > 0 && an.rPerim < 50){ S.marker.anchor.r = an.r.slice(); S.marker.anchor.rPerim = an.rPerim; }
+  }
   if (Array.isArray(p.corners) && p.corners.length === 4 &&
       p.corners.every(c => Array.isArray(c) && c.length === 2 && c.every(n => typeof n === 'number' && isFinite(n) && Math.abs(n) <= 10)))
     S.photo.corners = p.corners.map(c => [c[0], c[1]]);
@@ -1624,8 +1641,14 @@ async function renderInfo(){
     ['Fokus-Entfernung (Bereich)', esc(focusInfo.caps.focusDistance ? ['min', 'max', 'step'].map(k => k + ' ' + (focusInfo.caps.focusDistance[k] != null ? focusInfo.caps.focusDistance[k] : '–')).join(' · ') : '–')],
     ['Fokus letzter Versuch', esc(focusLog || '–')],
     ['Marker-Erkennung', esc(mkRunning ? (fmt1(mkState.fps) + ' /s · ' + fmt1(mkState.ms) + ' ms pro Bild (Mittel)') : 'aus')],
-    ['Vollsuche', esc(mkRunning ? fmt1(mkState.msFull) + ' ms · ' + mkState.blobs + ' Flecken vor Filter · ' + (mkCal.full.pick ? 'Weg ' + mkCal.full.pick.toUpperCase() : 'misst noch') : '–')],
-    ['Fenstersuche', esc(mkRunning ? fmt1(mkState.msWin) + ' ms · Anteil ' + Math.round(mkState.winShare * 100) + ' % · ' + (mkCal.win.pick ? 'Weg ' + mkCal.win.pick.toUpperCase() : 'misst noch') : '–')],
+    ['Erkennungsweg', esc(mkMeasure.active ? 'misst … (' + Object.keys(mkMeasure.results).length + '/' + MK_WAYS.length + ')' : mkWay ? mkWay.name : '–')],
+    ['Zeit je Bild', esc(mkRunning ? '(a) holen ' + fmt1(mkState.ta) + ' · (b) lesen ' + fmt1(mkState.tb) + ' · (c) auswerten ' + fmt1(mkState.tc) + ' ms' : '–')],
+    ['Messung der Wege', esc((() => { const p = lsGet(PERF_KEY), R = mkMeasure.active ? mkMeasure.results : (p && p.results) || {};
+        const t = MK_WAYS.filter(w => R[w.id]).map(w => w.name + ': ' + (R[w.id].ok ? fmt1(R[w.id].ms) + ' ms (' + fmt1(R[w.id].a) + '/' + fmt1(R[w.id].b) + '/' + fmt1(R[w.id].c) + ')' : 'nicht nutzbar – ' + R[w.id].note));
+        return t.length ? t.join(' | ') : '–'; })())],
+    ['Verworfen (Fehltreffer)', esc(mkStat.outliers + ' einzelne Punkte · ' + mkStat.rejected + ' ganze Bilder')],
+    ['Vollsuche', esc(mkRunning ? fmt1(mkState.msFull) + ' ms · ' + mkState.blobs + ' Flecken vor Filter' : '–')],
+    ['Fenstersuche', esc(mkRunning ? fmt1(mkState.msWin) + ' ms · Anteil ' + Math.round(mkState.winShare * 100) + ' %' : '–')],
     ['Verankert', esc(settings.marker.anchor.on ? 'ja' : 'nein')]
   ];
   infoBody.innerHTML = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
@@ -1881,7 +1904,7 @@ let mkCtx = null;
 const markerG = $('markerG'), mRings = [...markerG.querySelectorAll('circle')], mNums = [...markerG.querySelectorAll('text')];
 const markerChip = $('markerChip');
 // found: Marker in Video-Pixeln {x, y, r, label}
-const mkState = { found: [], blobs: 0, fps: 0, ms: 0, msFull: 0, msWin: 0, winShare: 0, prev: null };
+const mkState = { found: [], blobs: 0, fps: 0, ms: 0, msFull: 0, msWin: 0, winShare: 0, ta: 0, tb: 0, tc: 0, prev: null };
 let mkRunning = false, mkLast = 0, mkCount = 0, mkCountT = 0, mkMsAvg = 0;
 let learnMode = false;
 
@@ -1899,191 +1922,390 @@ function rgbToHsv(r, g, b){
   }
   return { h, s: max ? d / max : 0, v: max / 255 };
 }
-// Grenzen aus angelernter Farbe und Empfindlichkeit (1 = streng, 10 = großzügig)
+// Grenzen aus angelernter Farbe und Empfindlichkeit (1 = streng, 10 = großzügig).
+// Seit 0.10 lichtunabhängiger: Farbton und Sättigung entscheiden, Helligkeit nur noch grob
+// (mind. 25 % der angelernten), dazu eine Mindest-Farbigkeit gegen Farbrauschen in dunklen Stellen.
 function mkThresholds(){
   const c = settings.marker.color, t = settings.marker.tol;
   return { h: c.h, hTol: 6 + 3 * t,
            sMin: Math.max(0.15, c.s - (0.12 + 0.04 * t)),
-           vMin: Math.max(0.12, c.v - (0.15 + 0.05 * t)) };
+           vMin: Math.max(0.07, c.v * 0.25),
+           cMin: 12 };
 }
-/* ---------- Farbtabelle: 32×32×32-Farbwürfel, 1 = Markerfarbe (statt HSV-Rechnung pro Pixel) ---------- */
+/* ---------- Farbtabelle: 32×32×32-Farbwürfel, 1 = Markerfarbe ---------- */
 let mkLut = null, mkLutKey = '';
 function mkBuildLut(){
   const c = settings.marker.color, key = c ? c.h + '|' + c.s + '|' + c.v + '|' + settings.marker.tol : '-';
-  if (mkLut && key === mkLutKey) return mkLut;
+  if (mkLut && key === mkLutKey) return false;
   mkLutKey = key; mkLut = new Uint8Array(32768);
-  if (!c) return mkLut;
-  const T = mkThresholds(), vMin = T.vMin * 255;
-  for (let r = 0; r < 32; r++) for (let g = 0; g < 32; g++) for (let b = 0; b < 32; b++){
-    const R = r * 8 + 4, G = g * 8 + 4, B = b * 8 + 4;
-    const max = Math.max(R, G, B); if (max < vMin) continue;
-    const d = max - Math.min(R, G, B); if (d === 0 || d < T.sMin * max) continue;
-    let hh = max === R ? (G - B) / d : max === G ? (B - R) / d + 2 : (R - G) / d + 4;
-    hh *= 60; if (hh < 0) hh += 360;
-    let dh = Math.abs(hh - T.h); if (dh > 180) dh = 360 - dh;
-    if (dh <= T.hTol) mkLut[(r << 10) | (g << 5) | b] = 1;
-  }
-  return mkLut;
-}
-/* ---------- Flecken in einem Bildausschnitt (RGBA, w×h) ---------- */
-let mkMask = null, mkLab = null, mkStack = null;
-function mkBlobs(data, w, h){
-  const n = w * h, lut = mkLut;
-  if (!mkMask || mkMask.length < n){ mkMask = new Uint8Array(n); mkLab = new Uint8Array(n); mkStack = new Int32Array(n); }
-  const mask = mkMask, lab = mkLab, stack = mkStack;
-  const d32 = new Uint32Array(data.buffer, data.byteOffset, n);   // ein Pixel = eine Zahl (R im unteren Byte)
-  for (let i = 0; i < n; i++){
-    const px = d32[i];
-    mask[i] = lut[((px & 0xF8) << 7) | ((px >> 6) & 0x3E0) | ((px >> 19) & 0x1F)];
-    lab[i] = 0;
-  }
-  const blobs = [];
-  for (let i = 0; i < n; i++){
-    if (!mask[i] || lab[i]) continue;
-    let sp = 0, area = 0, sx = 0, sy = 0, minx = w, maxx = 0, miny = h, maxy = 0;
-    stack[sp++] = i; lab[i] = 1;
-    while (sp){
-      const j = stack[--sp], x = j % w, y = (j / w) | 0;
-      area++; sx += x; sy += y;
-      if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
-      if (x > 0     && mask[j - 1] && !lab[j - 1]){ lab[j - 1] = 1; stack[sp++] = j - 1; }
-      if (x < w - 1 && mask[j + 1] && !lab[j + 1]){ lab[j + 1] = 1; stack[sp++] = j + 1; }
-      if (y > 0     && mask[j - w] && !lab[j - w]){ lab[j - w] = 1; stack[sp++] = j - w; }
-      if (y < h - 1 && mask[j + w] && !lab[j + w]){ lab[j + w] = 1; stack[sp++] = j + w; }
+  if (c){
+    const T = mkThresholds(), vMin = T.vMin * 255;
+    for (let r = 0; r < 32; r++) for (let g = 0; g < 32; g++) for (let b = 0; b < 32; b++){
+      const R = r * 8 + 4, G = g * 8 + 4, B = b * 8 + 4;
+      const max = Math.max(R, G, B); if (max < vMin) continue;
+      const d = max - Math.min(R, G, B); if (d < T.cMin || d < T.sMin * max) continue;
+      let hh = max === R ? (G - B) / d : max === G ? (B - R) / d + 2 : (R - G) / d + 4;
+      hh *= 60; if (hh < 0) hh += 360;
+      let dh = Math.abs(hh - T.h); if (dh > 180) dh = 360 - dh;
+      if (dh <= T.hTol) mkLut[(r << 10) | (g << 5) | b] = 1;
     }
-    blobs.push({ area, cx: sx / area + 0.5, cy: sy / area + 0.5, bw: maxx - minx + 1, bh: maxy - miny + 1 });
   }
-  return blobs;
+  return true;   // neue Tabelle (Worker muss sie bekommen)
 }
-// nach Größe und Rundheit filtern
-function mkFilter(blobs, minA, maxA){
-  return blobs.filter(o => {
-    if (o.area < minA || o.area > maxA) return false;
-    const asp = Math.max(o.bw, o.bh) / Math.min(o.bw, o.bh), fill = o.area / (o.bw * o.bh);
-    return asp <= 2.5 && fill >= 0.45;
-  });
-}
-/* ---------- Lesewege: Speicher-Canvas (CPU) oder Grafik-Canvas (GPU) ----------
-   Welcher Weg schneller ist, hängt vom Gerät ab. Die ersten Bilder werden abwechselnd gemessen,
-   danach wird der schnellere Weg (Median) für Voll- und Fenstersuche getrennt fest gewählt. */
-function mkCanvasPair(){
-  const mk = wrf => { const c = document.createElement('canvas'); return { c, x: null, wrf }; };
-  return { cpu: mk(true), gpu: mk(false) };
-}
-function mkCtxOf(o, w, h){
-  if (o.c.width < w || o.c.height < h || !o.x){
-    o.c.width = Math.max(o.c.width, w); o.c.height = Math.max(o.c.height, h);
-    o.x = o.c.getContext('2d', o.wrf ? { willReadFrequently: true } : {});
-  }
-  return o.x;
-}
-const mkFullC = mkCanvasPair(), mkWinC = mkCanvasPair();
-const mkCal = { full: { cpu: [], gpu: [], pick: null }, win: { cpu: [], gpu: [], pick: null } };
-function mkChoose(kind){
-  const k = mkCal[kind];
-  if (k.pick) return k.pick;
-  return k.cpu.length <= k.gpu.length ? 'cpu' : 'gpu';
-}
-function mkNote(kind, way, ms){
-  const k = mkCal[kind];
-  if (k.pick) return;
-  k[way].push(ms);
-  if (k.cpu.length >= 8 && k.gpu.length >= 8){
-    const med = a => a.slice().sort((x, y) => x - y)[a.length >> 1];
-    k.pick = med(k.cpu) <= med(k.gpu) ? 'cpu' : 'gpu';
-  }
-}
-/* ---------- Vollsuche: ganzes Bild in MK_W Breite ---------- */
-function mkFullSearch(vw, vh){
-  const w = MK_W, h = Math.max(1, Math.round(MK_W * vh / vw)), n = w * h;
-  const way = mkChoose('full'), t0 = performance.now();
-  const ctx = mkCtxOf(mkFullC[way], w, h);
-  ctx.drawImage(cam, 0, 0, w, h);
-  const blobs = mkBlobs(ctx.getImageData(0, 0, w, h).data, w, h);
-  mkNote('full', way, performance.now() - t0);
-  mkState.blobs = blobs.length;
-  const k = vw / w;
-  return mkFilter(blobs, 8, n * 0.02).sort((a, b) => b.area - a.area).slice(0, 4)
-    .map(o => ({ x: o.cx * k, y: o.cy * k, r: Math.sqrt(o.area / Math.PI) * k }));
-}
-/* ---------- Fenstersuche: kleine Ausschnitte um die vorhergesagten Lagen ----------
-   Doppelte Auflösung der Vollsuche. Alle Fenster werden in EIN Bild (2×2-Raster mit Lücken) gezeichnet
-   und mit einem einzigen Lesezugriff ausgewertet. */
-function mkWindowSearch(vw, vh){
-  const s = 2 * MK_W / vw;                       // Pixel des Ausschnitts pro Kamerapixel
-  const fullArea = MK_W * MK_W * vh / vw;
-  const minA = 8 * 4, maxA = fullArea * 0.02 * 4, GAP = 3;
-  const wins = [];
-  for (const t of mkTracks){
-    const px = t.x + t.vx, py = t.y + t.vy;      // vorhergesagte Lage
-    const half = Math.max(4 * t.r, 40 * vw / 1280) + 1.5 * Math.hypot(t.vx, t.vy);
-    const x0 = Math.max(0, Math.floor(px - half)), y0 = Math.max(0, Math.floor(py - half));
-    const x1 = Math.min(vw, Math.ceil(px + half)), y1 = Math.min(vh, Math.ceil(py + half));
-    if (x1 - x0 < 4 || y1 - y0 < 4) continue;
-    wins.push({ t, px, py, x0, y0, x1, y1, ww: Math.max(4, Math.round((x1 - x0) * s)), wh: Math.max(4, Math.round((y1 - y0) * s)) });
-  }
-  if (!wins.length) return [];
-  const cw = Math.max(...wins.map(w => w.ww)) + GAP, ch = Math.max(...wins.map(w => w.wh)) + GAP;
-  const W = cw * 2, H = ch * Math.ceil(wins.length / 2);
-  const way = mkChoose('win'), t0 = performance.now();
-  const ctx = mkCtxOf(mkWinC[way], W, H);
-  ctx.clearRect(0, 0, W, H);
-  wins.forEach((w, i) => { w.ox = (i % 2) * cw; w.oy = (i >> 1) * ch;
-    ctx.drawImage(cam, w.x0, w.y0, w.x1 - w.x0, w.y1 - w.y0, w.ox, w.oy, w.ww, w.wh); });
-  const cand = mkFilter(mkBlobs(ctx.getImageData(0, 0, W, H).data, W, H), minA, maxA);
-  mkNote('win', way, performance.now() - t0);
-  const out = [];
-  for (const w of wins){
-    const fx = (w.x1 - w.x0) / w.ww, fy = (w.y1 - w.y0) / w.wh;
-    let best = null, bd = Infinity;
-    for (const o of cand){
-      const lx = o.cx - w.ox, ly = o.cy - w.oy;
-      if (lx < 0 || ly < 0 || lx > w.ww || ly > w.wh) continue;        // gehört zu einem anderen Fenster
-      const d = Math.hypot(w.x0 + lx * fx - w.px, w.y0 + ly * fy - w.py);
-      if (d < bd){ bd = d; best = { x: w.x0 + lx * fx, y: w.y0 + ly * fy, r: Math.sqrt(o.area / Math.PI) * fx }; }
+/* ---------- Auswertung eines Bildes (läuft im Hauptprogramm ODER im Worker) ----------
+   d32: Pixel als 32-Bit-Zahlen (R im unteren Byte), W×H. req.rects: Suchbereiche in Anteilen (0..1)
+   oder null = ganzes Bild. Liefert Flecken nach Größe/Rundheit gefiltert, Koordinaten in Anteilen. */
+function mkAnalyze(d32, W, H, lut, req, bufs){
+  const n = W * H;
+  if (!bufs.mask || bufs.mask.length < n){ bufs.mask = new Uint8Array(n); bufs.lab = new Uint8Array(n); bufs.stack = new Int32Array(n); }
+  const mask = bufs.mask, lab = bufs.lab, stack = bufs.stack;
+  const whole = !req.rects || req.wantMask;
+  const rects = whole ? [[0, 0, W, H]] : req.rects.map(r => [Math.max(0, Math.floor(r[0] * W)), Math.max(0, Math.floor(r[1] * H)),
+                                                         Math.min(W, Math.ceil(r[2] * W)), Math.min(H, Math.ceil(r[3] * H))]);
+  if (!whole) mask.fill(0, 0, n);
+  for (const [x0, y0, x1, y1] of rects){
+    for (let y = y0; y < y1; y++){
+      let i = y * W + x0;
+      for (let x = x0; x < x1; x++, i++){
+        const px = d32[i];
+        mask[i] = lut[((px & 0xF8) << 7) | ((px >> 6) & 0x3E0) | ((px >> 19) & 0x1F)];
+        lab[i] = 0;
+      }
     }
-    if (best) out.push(Object.assign(best, { label: w.t.label }));
   }
-  return out;
+  const minA = req.minA, maxA = W * H * 0.02, cands = [];
+  let count = 0;
+  for (const [x0, y0, x1, y1] of rects){
+    for (let y = y0; y < y1; y++){
+      for (let x = x0, i = y * W + x0; x < x1; x++, i++){
+        if (!mask[i] || lab[i]) continue;
+        let sp = 0, area = 0, sx = 0, sy = 0, minx = W, maxx = 0, miny = H, maxy = 0;
+        stack[sp++] = i; lab[i] = 1;
+        while (sp){
+          const j = stack[--sp], xx = j % W, yy = (j / W) | 0;
+          area++; sx += xx; sy += yy;
+          if (xx < minx) minx = xx; if (xx > maxx) maxx = xx; if (yy < miny) miny = yy; if (yy > maxy) maxy = yy;
+          if (xx > 0     && mask[j - 1] && !lab[j - 1]){ lab[j - 1] = 1; stack[sp++] = j - 1; }
+          if (xx < W - 1 && mask[j + 1] && !lab[j + 1]){ lab[j + 1] = 1; stack[sp++] = j + 1; }
+          if (yy > 0     && mask[j - W] && !lab[j - W]){ lab[j - W] = 1; stack[sp++] = j - W; }
+          if (yy < H - 1 && mask[j + W] && !lab[j + W]){ lab[j + W] = 1; stack[sp++] = j + W; }
+        }
+        count++;
+        if (area < minA || area > maxA) continue;
+        const bw = maxx - minx + 1, bh = maxy - miny + 1;
+        if (Math.max(bw, bh) / Math.min(bw, bh) > 2.5 || area / (bw * bh) < 0.45) continue;
+        cands.push({ x: (sx / area + 0.5) / W, y: (sy / area + 0.5) / H, r: Math.sqrt(area / Math.PI) / W, area });
+      }
+    }
+  }
+  let m = null;
+  if (req.wantMask){ m = new Uint8Array(n); m.set(mask.subarray(0, n)); }
+  return { cands, count, mask: m };
 }
-/* ---------- ein Kamerabild auswerten ---------- */
-let mkTracks = [], mkLastFull = 0, mkSmooth = {}, mkWinCount = 0, mkFullCount = 0;
-function mkProcess(){
-  const vw = cam.videoWidth, vh = cam.videoHeight;
-  if (!vw || !vh || !settings.marker.color) return;
-  mkBuildLut();
-  const t0 = performance.now();
-  // Vollsuche, wenn nichts verfolgt wird, wenn Marker fehlen (höchstens alle 0,3 s) oder 1×/s zur Kontrolle
-  const full = !mkTracks.length || (mkTracks.length < 4 && t0 - mkLastFull > 300) || t0 - mkLastFull > 1000;
-  let found;
-  if (full){
-    found = orderMarkers(mkFullSearch(vw, vh));
-    mkLastFull = t0;
+
+/* ---------- Wege, das Kamerabild für die Erkennung zu holen ----------
+   (a) Bild holen/zeichnen, (b) Pixel lesen, (c) auswerten. Gemessen wird je Gerät, der schnellste
+   gültige Weg wird gespeichert (Diagnose: "Erkennung neu messen"). */
+const MK_WAYS = [
+  { id: 'cpu-voll',     grab: 'cpu',    src: 'main', name: 'Canvas (CPU) · volle Spur' },
+  { id: 'bitmap-voll',  grab: 'bitmap', src: 'main', name: 'ImageBitmap · volle Spur' },
+  { id: 'worker-voll',  grab: 'worker', src: 'main', name: 'Worker (VideoFrame) · volle Spur' },
+  { id: 'cpu-klein',    grab: 'cpu',    src: 'low',  name: 'Canvas (CPU) · kleine Zweitspur' },
+  { id: 'bitmap-klein', grab: 'bitmap', src: 'low',  name: 'ImageBitmap · kleine Zweitspur' },
+  { id: 'worker-klein', grab: 'worker', src: 'low',  name: 'Worker (VideoFrame) · kleine Zweitspur' }
+];
+const PERF_KEY = 'zeichenhilfe.mkperf';
+const mkBufs = {};
+const mkCv = document.createElement('canvas');
+let mkCx = null;
+let mkWay = null, mkBusy = false, mkWorker = null, mkWorkerTrack = null, mkLow = null, mkGen = 0;
+let mkLastRes = 0;
+const maskCv = $('maskCv');
+let showMask = false;
+
+// kleine Zweitspur (z. B. 640×360) nur für die Erkennung; Anzeige bleibt bei voller Auflösung
+async function mkEnsureLow(){
+  if (mkLow) return mkLow.ok ? mkLow : null;
+  mkLow = { ok: false, note: '' };
+  const tr = camTrack(), vw = cam.videoWidth, vh = cam.videoHeight;
+  if (!tr || !vw){ mkLow.note = 'keine Kamera'; return null; }
+  try {
+    const st0 = tr.getSettings();
+    const L = 640, w = vw >= vh ? L : Math.round(L * vw / vh), h = vw >= vh ? Math.round(L * vh / vw) : L;
+    const cl = tr.clone();
+    await cl.applyConstraints({ width: { ideal: w }, height: { ideal: h }, resizeMode: 'crop-and-scale' });
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.autoplay = true;
+    v.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none';
+    v.srcObject = new MediaStream([cl]);
+    document.body.appendChild(v);
+    try { await v.play(); } catch(e){}
+    for (let i = 0; i < 40 && !v.videoWidth; i++) await sleepMs(25);
+    const st1 = tr.getSettings();
+    const sameAspect = v.videoWidth && Math.abs(v.videoWidth / v.videoHeight - vw / vh) < 0.02;
+    const smaller = v.videoWidth && v.videoWidth < vw;
+    const displayOk = st1.width === st0.width && st1.height === st0.height;
+    mkLow = { ok: !!(sameAspect && smaller && displayOk), track: cl, video: v, w: v.videoWidth, h: v.videoHeight,
+              note: !sameAspect ? 'anderes Seitenverhältnis' : !smaller ? 'nicht kleiner' : !displayOk ? 'Anzeige verändert' : '' };
+    if (!mkLow.ok){ const n = mkLow.note; mkLowStop(); mkLow = { ok: false, note: n }; }
+  } catch(e){ mkLowStop(); mkLow = { ok: false, note: (e.name || 'Fehler') }; }
+  return mkLow.ok ? mkLow : null;
+}
+function mkLowStop(){
+  if (mkLow && mkLow.track){ try { mkLow.track.stop(); } catch(e){} }
+  if (mkLow && mkLow.video){ try { mkLow.video.srcObject = null; mkLow.video.remove(); } catch(e){} }
+  mkLow = null;
+}
+// Worker als Blob aus derselben Datei (keine Zusatzdatei nötig)
+const MK_WORKER_SRC = mkAnalyze.toString() + `
+let lut = null, req = null, bufs = {}, oc = null, ox = null, gen = 0;
+onmessage = async e => {
+  const m = e.data;
+  if (m.type === 'lut') lut = m.lut;
+  if (m.type === 'req') req = m.req;
+  if (m.type === 'stream'){
+    gen = m.gen;
+    const reader = m.readable.getReader();
+    for (;;){
+      const r = await reader.read();
+      if (r.done) break;
+      const fr = r.value;
+      if (!lut || !req){ fr.close(); continue; }
+      const dw = fr.displayWidth, dh = fr.displayHeight, W = 320, H = Math.max(1, Math.round(320 * dh / dw));
+      if (!oc || oc.width !== W || oc.height !== H){ oc = new OffscreenCanvas(W, H); ox = oc.getContext('2d', { willReadFrequently: true }); }
+      const t0 = performance.now();
+      ox.drawImage(fr, 0, 0, W, H);
+      const t1 = performance.now();
+      fr.close();
+      const img = ox.getImageData(0, 0, W, H);
+      const t2 = performance.now();
+      const res = mkAnalyze(new Uint32Array(img.data.buffer), W, H, lut, req, bufs);
+      const t3 = performance.now();
+      postMessage({ type: 'res', gen, res, W, H, dw, dh, full: !req.rects, ta: t1 - t0, tb: t2 - t1, tc: t3 - t2 }, res.mask ? [res.mask.buffer] : []);
+    }
+  }
+};`;
+function mkWorkerStop(){
+  if (mkWorker){ try { mkWorker.terminate(); } catch(e){} mkWorker = null; }
+  if (mkWorkerTrack){ try { mkWorkerTrack.stop(); } catch(e){} mkWorkerTrack = null; }
+}
+const workerSupported = () => typeof MediaStreamTrackProcessor === 'function' && typeof Worker === 'function' && typeof OffscreenCanvas === 'function';
+function mkWorkerStart(track){
+  mkWorkerStop();
+  if (!workerSupported()) return false;
+  try {
+    mkWorkerTrack = track.clone();
+    const proc = new MediaStreamTrackProcessor({ track: mkWorkerTrack, maxBufferSize: 1 });
+    const url = URL.createObjectURL(new Blob([MK_WORKER_SRC], { type: 'text/javascript' }));
+    mkWorker = new Worker(url);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    const gen = mkGen;
+    mkWorker.onmessage = e => {
+      const d = e.data;
+      if (d.type !== 'res' || d.gen !== mkGen || !mkWay || mkWay.grab !== 'worker') return;
+      d.res.aspectOk = Math.abs(d.dw / d.dh - cam.videoWidth / cam.videoHeight) < 0.02;
+      mkHandleResult(d.res, { a: d.ta, b: d.tb, c: d.tc, full: d.full, W: d.W, H: d.H, aspectOk: d.res.aspectOk });
+      if (mkWorker) mkWorker.postMessage({ type: 'req', req: mkReq() });
+    };
+    mkWorker.onerror = () => { mkWayFailed('Worker-Fehler'); };
+    mkBuildLut();
+    mkWorker.postMessage({ type: 'lut', lut: mkLut });
+    mkWorker.postMessage({ type: 'req', req: mkReq() });
+    mkWorker.postMessage({ type: 'stream', readable: proc.readable, gen }, [proc.readable]);
+    return true;
+  } catch(e){ mkWorkerStop(); return false; }
+}
+// Weg starten (asynchron wegen Zweitspur)
+async function mkStartWay(way){
+  mkWorkerStop();
+  mkGen++;
+  mkWay = way; mkBusy = false;
+  if (way.src === 'low'){
+    const lo = await mkEnsureLow();
+    if (!lo){ mkWayFailed('Zweitspur: ' + (mkLow && mkLow.note || 'nicht möglich')); return; }
+  } else if (!mkMeasure.active) mkLowStop();     // Zweitspur nur behalten, solange noch gemessen wird
+  if (way.grab === 'worker'){
+    const tr = way.src === 'low' ? mkLow.track : camTrack();
+    if (!tr || !mkWorkerStart(tr)) mkWayFailed('Worker nicht verfügbar');
+    return;
+  }
+  if (way.grab === 'bitmap' && typeof createImageBitmap !== 'function'){ mkWayFailed('createImageBitmap fehlt'); return; }
+  mkSchedule();
+}
+function mkSrcEl(){ return mkWay && mkWay.src === 'low' && mkLow && mkLow.ok ? mkLow.video : cam; }
+function mkSchedule(){
+  if (!mkRunning || !mkWay || mkWay.grab === 'worker') return;
+  const el = mkSrcEl(), gen = mkGen;
+  const cb = () => { if (gen === mkGen) mkTick(); };
+  if (el.requestVideoFrameCallback) el.requestVideoFrameCallback(cb);
+  else requestAnimationFrame(cb);
+}
+// Hauptprogramm-Wege: ein Bild holen, lesen, auswerten
+async function mkTick(){
+  if (!mkRunning || !mkWay) return;
+  const now = performance.now();
+  if (!mkBusy && now - mkLast >= Math.max(25, mkMsAvg * 2)){
+    mkBusy = true; mkLast = now;
+    const gen = mkGen, way = mkWay;
+    try {
+      const el = mkSrcEl(), ew = el.videoWidth, eh = el.videoHeight;
+      if (ew && eh){
+        const W = 320, H = Math.max(1, Math.round(320 * eh / ew));
+        if (mkCv.width !== W || mkCv.height !== H || !mkCx){ mkCv.width = W; mkCv.height = H; mkCx = mkCv.getContext('2d', { willReadFrequently: true }); }
+        mkBuildLut();
+        const req = mkReq();
+        const t0 = performance.now();
+        if (way.grab === 'bitmap'){
+          const bmp = await createImageBitmap(el, { resizeWidth: W, resizeHeight: H, resizeQuality: 'low' });
+          mkCx.drawImage(bmp, 0, 0); bmp.close();
+        } else mkCx.drawImage(el, 0, 0, W, H);
+        const t1 = performance.now();
+        const img = mkCx.getImageData(0, 0, W, H);
+        const t2 = performance.now();
+        const res = mkAnalyze(new Uint32Array(img.data.buffer), W, H, mkLut, req, mkBufs);
+        const t3 = performance.now();
+        if (gen === mkGen) mkHandleResult(res, { a: t1 - t0, b: t2 - t1, c: t3 - t2, full: !req.rects, W, H, aspectOk: Math.abs(ew / eh - cam.videoWidth / cam.videoHeight) < 0.02 });
+      }
+    } catch(e){ /* ein Bild überspringen */ }
+    mkBusy = false;
+  }
+  mkSchedule();
+}
+
+/* ---------- Leistung messen (je ca. 30 Bilder pro Weg) und schnellsten Weg merken ---------- */
+const mkMeasure = { active: false, queue: [], cur: null, samples: [], skip: 0, t0: 0, ref: null, results: {}, posDev: [] };
+function mkPerfKey(){ return cam.videoWidth + 'x' + cam.videoHeight; }
+function mkLoadPerf(){ const p = lsGet(PERF_KEY); return (p && p.key === mkPerfKey() && MK_WAYS.some(w => w.id === p.pick)) ? p : null; }
+function mkMeasureStart(){
+  mkMeasure.active = true;
+  mkMeasure.queue = MK_WAYS.slice();
+  mkMeasure.results = {}; mkMeasure.refHit = null;
+  mkMeasureNext();
+}
+async function mkMeasureNext(){
+  if (!mkRunning){ mkMeasure.active = false; return; }
+  const w = mkMeasure.queue.shift();
+  if (!w){ mkMeasureFinish(); return; }
+  mkMeasure.cur = w; mkMeasure.samples = []; mkMeasure.skip = 3; mkMeasure.t0 = performance.now(); mkMeasure.posDev = []; mkMeasure.hits = 0;
+  await mkStartWay(w);
+  const cur = w;
+  setTimeout(() => { if (mkMeasure.active && mkMeasure.cur === cur) mkMeasureClose(); }, 9000);   // Zeitlimit je Weg
+}
+function mkWayFailed(note){
+  if (mkMeasure.active && mkMeasure.cur){
+    mkMeasure.results[mkMeasure.cur.id] = { ok: false, note };
+    mkMeasure.cur = null;
+    setTimeout(mkMeasureNext, 0);
+  } else if (mkWay && mkWay.id !== 'cpu-voll'){
+    mkStartWay(MK_WAYS[0]);             // gespeicherter Weg geht nicht mehr: sicherer Standardweg
+  }
+}
+function mkMeasureSample(t, res){
+  const M = mkMeasure;
+  if (!M.cur) return;
+  if (M.skip > 0){ M.skip--; return; }
+  M.samples.push(t);
+  // Kontrolle (bewegungsunabhängig): gleiches Seitenverhältnis wie die Anzeige (sonst ist das Bild z. B.
+  // gedreht) und der Weg muss ähnlich oft Punkte finden wie der erste Weg (Canvas, volle Spur).
+  M.posDev.push(t.aspectOk ? 0 : 1);
+  M.hits = (M.hits || 0) + (res.length >= 3 ? 1 : 0);
+  if (M.samples.length >= 30) mkMeasureClose();
+}
+function mkMeasureClose(){
+  const M = mkMeasure, w = M.cur;
+  if (!w) return;
+  M.cur = null;
+  const s = M.samples;
+  if (s.length < 5){ M.results[w.id] = { ok: false, note: 'zu wenige Bilder (' + s.length + ')' }; }
+  else {
+    const med = k => { const a = s.map(x => x[k]).sort((p, q) => p - q); return a[a.length >> 1]; };
+    const tot = s.map(x => x.a + x.b + x.c).sort((p, q) => p - q)[s.length >> 1];
+    const fps = s.length * 1000 / Math.max(1, performance.now() - M.t0);
+    const aspectBad = M.posDev.filter(v => v).length > M.posDev.length / 2;
+    const hitShare = M.hits / s.length;
+    if (w.id === 'cpu-voll') M.refHit = hitShare;
+    const finds = !(M.refHit > 0.5 && hitShare < 0.2);
+    M.results[w.id] = { ok: !aspectBad && finds, ms: tot, a: med('a'), b: med('b'), c: med('c'), fps, hit: hitShare,
+                        note: aspectBad ? 'Bild anders ausgerichtet' : !finds ? 'findet kaum Punkte' : '' };
+  }
+  setTimeout(mkMeasureNext, 0);
+}
+function mkMeasureFinish(){
+  const R = mkMeasure.results;
+  const ok = MK_WAYS.filter(w => R[w.id] && R[w.id].ok);
+  let pick = MK_WAYS[0];
+  if (ok.length){
+    ok.sort((a, b) => R[a.id].ms - R[b.id].ms);
+    pick = ok[0];
+    // Worker bevorzugen, wenn fast gleich schnell: rechnet neben dem Hauptprogramm, Bedienung bleibt flüssiger
+    const wk = ok.find(w => w.grab === 'worker');
+    if (wk && R[wk.id].ms <= R[pick.id].ms * 1.25) pick = wk;
+  }
+  mkMeasure.active = false;
+  lsSet(PERF_KEY, { key: mkPerfKey(), pick: pick.id, results: R, at: Date.now() });
+  if (pick.src !== 'low') mkLowStop();
+  mkStartWay(pick);
+}
+
+/* ---------- Suchauftrag für das nächste Bild ---------- */
+let mkTracks = [], mkLastFull = 0, mkLost = 0, mkPending = null;
+let mkWinCount = 0, mkFullCount = 0;
+const mkStat = { rejected: 0, outliers: 0 };
+function mkReq(){
+  const vw = cam.videoWidth || 1, vh = cam.videoHeight || 1, now = performance.now();
+  const base = { minA: 8, wantMask: showMask };
+  const A = settings.marker.anchor;
+  let wins = null;
+  if (A.on && A.ref){
+    // verankert: nur in Fenstern um die vorhergesagten Lagen suchen, nie im ganzen Bild
+    wins = mkAnchorPred().map(p => ({ x: p.x, y: p.y, half: Math.min(0.3 * Math.max(vw, vh), p.half * (1 + 0.25 * Math.min(mkLost, 30))) }));
   } else {
-    found = mkWindowSearch(vw, vh);
+    const full = !mkTracks.length || (mkTracks.length < 4 && now - mkLastFull > 300) || now - mkLastFull > 1000;
+    if (!full) wins = mkTracks.map(t => ({ x: t.x + t.vx, y: t.y + t.vy, half: Math.max(4 * t.r, 40 * vw / 1280) + 1.5 * Math.hypot(t.vx, t.vy) }));
+  }
+  return Object.assign(base, { rects: wins ? wins.map(w => [(w.x - w.half) / vw, (w.y - w.half) / vh, (w.x + w.half) / vw, (w.y + w.half) / vh]) : null, wins });
+}
+
+/* ---------- Ergebnis verarbeiten: Zuordnen, Prüfen, Glätten, Verankern ---------- */
+let mkSm = {};      // Glättung je Nummer (One-Euro-Filter)
+function mkHandleResult(res, t){
+  if (!mkRunning) return;
+  const vw = cam.videoWidth, vh = cam.videoHeight;
+  if (!vw) return;
+  const k = vw / 1280;
+  const cands = res.cands.map(c => ({ x: c.x * vw, y: c.y * vh, r: c.r * vw }));
+  if (t.full) mkState.blobs = res.count;
+  const A = settings.marker.anchor;
+  let found;
+  if (A.on && A.ref){
+    found = mkAssign(cands, mkAnchorPred(), true);
+    found = mkPlausible(found);
+  } else if (t.full){
+    mkLastFull = performance.now();
+    found = orderMarkers(cands.sort((a, b) => b.r - a.r).slice(0, 4));
+  } else {
+    found = mkAssign(cands, mkTracks.map(tr => ({ label: tr.label, x: tr.x + tr.vx, y: tr.y + tr.vy, r: tr.r,
+      half: Math.max(4 * tr.r, 40 * vw / 1280) + 1.5 * Math.hypot(tr.vx, tr.vy) })), false);
     if (found.length === 4) mkState.prev = found.map(p => ({ x: p.x, y: p.y, label: p.label }));
   }
-  // Spuren (Lage + Bewegung je Nummer) für die nächste Fenstersuche
-  const old = new Map(mkTracks.map(t => [t.label, t]));
-  mkTracks = found.map(f => { const o = old.get(f.label);
+  // Spuren für die Vorhersage (ungeglättet)
+  const old = new Map(mkTracks.map(tr => [tr.label, tr]));
+  if (!(A.on && A.ref) || found.length) mkTracks = found.map(f => { const o = old.get(f.label);
     return { label: f.label, x: f.x, y: f.y, r: f.r, vx: o ? f.x - o.x : 0, vy: o ? f.y - o.y : 0 }; });
-  // Glätten: Totzone ≈ 0,8 Kamerapixel (bezogen auf 1280 px Breite), größere Bewegungen schnell übernehmen
-  const D = 0.8 * vw / 1280;
-  mkState.found = found.map(f => {
-    let sm = mkSmooth[f.label];
-    if (!sm){ sm = mkSmooth[f.label] = { x: f.x, y: f.y }; }
-    else {
-      const d = Math.hypot(f.x - sm.x, f.y - sm.y);
-      if (d > D){ const a = Math.min(1, Math.max(0.35, (d - D) / (4 * D))); sm.x += a * (f.x - sm.x); sm.y += a * (f.y - sm.y); }
-    }
-    return { x: sm.x, y: sm.y, r: f.r, label: f.label };
-  });
+  // Glätten
+  mkState.found = found.map(f => Object.assign(mkSmooth(f, k), { r: f.r, label: f.label }));
+  for (const l of Object.keys(mkSm)) if (!found.some(f => f.label === +l)) mkSm[l].miss = (mkSm[l].miss || 0) + 1;
+  mkLost = found.length === 4 ? 0 : mkLost + 1;
   // Messwerte
-  const now = performance.now(), ms = now - t0;
+  const ms = t.a + t.b + t.c;
   mkMsAvg = mkMsAvg ? mkMsAvg * 0.8 + ms * 0.2 : ms;
   mkState.ms = mkMsAvg;
-  if (full){ mkState.msFull = mkState.msFull ? mkState.msFull * 0.7 + ms * 0.3 : ms; mkFullCount++; }
+  mkState.ta = mkState.ta ? mkState.ta * 0.8 + t.a * 0.2 : t.a;
+  mkState.tb = mkState.tb ? mkState.tb * 0.8 + t.b * 0.2 : t.b;
+  mkState.tc = mkState.tc ? mkState.tc * 0.8 + t.c * 0.2 : t.c;
+  if (t.full){ mkState.msFull = mkState.msFull ? mkState.msFull * 0.7 + ms * 0.3 : ms; mkFullCount++; }
   else { mkState.msWin = mkState.msWin ? mkState.msWin * 0.8 + ms * 0.2 : ms; mkWinCount++; }
+  const now = performance.now();
   mkCount++;
   if (!mkCountT) mkCountT = now;
   if (now - mkCountT >= 1000){
@@ -2091,13 +2313,205 @@ function mkProcess(){
     mkState.winShare = mkWinCount / Math.max(1, mkWinCount + mkFullCount);
     mkCount = 0; mkWinCount = 0; mkFullCount = 0; mkCountT = now;
   }
-  anchorApply();
+  mkLastRes = now;
+  if (mkMeasure.active) mkMeasureSample(t, res.cands);
+  if (A.on) anchorApply();
+  if (showMask && res.mask) drawMask(res.mask, t.W, t.H);
   markerDraw();
+}
+// Kandidaten den erwarteten Lagen (je Nummer) zuordnen: im Fenster, passende Größe, nächstgelegen
+function mkAssign(cands, preds, anchored){
+  const out = [];
+  const A = settings.marker.anchor, vw = cam.videoWidth;
+  const sizeRatio = anchored ? mkScaleRatio() : 1;
+  for (const p of preds){
+    let rExp = p.r;
+    if (anchored && A.r && A.r[p.label - 1]) rExp = A.r[p.label - 1] * vw * sizeRatio;
+    let best = null, bd = Infinity;
+    for (const c of cands){
+      if (Math.abs(c.x - p.x) > p.half || Math.abs(c.y - p.y) > p.half) continue;   // außerhalb des Fensters: ignorieren
+      if (rExp && (c.r < 0.5 * rExp || c.r > 2 * rExp)) continue;                      // Größe passt nicht
+      const d = Math.hypot(c.x - p.x, c.y - p.y);
+      if (d < bd){ bd = d; best = c; }
+    }
+    if (best && !out.some(o => o === best)) out.push(Object.assign({}, best, { label: p.label }));
+  }
+  return out.sort((a, b) => a.label - b.label);
+}
+
+/* ---------- Verankern: Vorhersage und Plausibilität ---------- */
+let anchorLast = null;     // geglättete Markerlage (normiert) der gezeigten Fotolage
+let anchorAcc = null;      // zuletzt angenommene ungeglättete Lagen (Video-Pixel) je Nummer
+let anchorPrevAcc = null;
+let anchorH = null;        // Homographie Referenz -> zuletzt angenommene Lage (normiert)
+function mkAnchorPred(){
+  const A = settings.marker.anchor, vw = cam.videoWidth || 1, vh = cam.videoHeight || 1;
+  const H = anchorH || ID3, ratio = mkScaleRatio();
+  return [1, 2, 3, 4].map(l => {
+    const q = m3apply(H, A.ref[l - 1][0], A.ref[l - 1][1]) || { x: A.ref[l - 1][0], y: A.ref[l - 1][1] };
+    let x = q.x * vw, y = q.y * vh;
+    if (anchorAcc && anchorPrevAcc && anchorAcc[l] && anchorPrevAcc[l]){ x += anchorAcc[l].x - anchorPrevAcc[l].x; y += anchorAcc[l].y - anchorPrevAcc[l].y; }
+    const r = A.r && A.r[l - 1] ? A.r[l - 1] * vw * ratio : 12 * vw / 1280;
+    return { label: l, x, y, r, half: Math.max(4 * r, 40 * vw / 1280) };
+  });
+}
+// Größenverhältnis aktuell / beim Merken der Punktgrößen (über den Umfang des Marker-Vierecks)
+function quadPerim(pts){ let s = 0; for (let i = 0; i < 4; i++) s += Math.hypot(pts[(i + 1) % 4][0] - pts[i][0], pts[(i + 1) % 4][1] - pts[i][1]); return s; }
+function mkScaleRatio(){
+  const A = settings.marker.anchor, vw = cam.videoWidth || 1, vh = cam.videoHeight || 1;
+  if (!A.rPerim || !A.ref) return 1;
+  const H = anchorH || ID3;
+  const pts = A.ref.map(p => { const q = m3apply(H, p[0], p[1]) || { x: p[0], y: p[1] }; return [q.x * vw / vw, q.y * vh / vw]; });
+  return quadPerim(pts) / A.rPerim;
+}
+// Affine Abbildung aus 3 Punktpaaren
+function affine3(src, dst){
+  const [a, b, c] = src, [A1, B1, C1] = dst;
+  const det = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+  if (Math.abs(det) < 1e-9) return null;
+  const sol = k => {
+    const u = B1[k] - A1[k], v = C1[k] - A1[k];
+    const p = (u * (c[1] - a[1]) - v * (b[1] - a[1])) / det, q = (v * (b[0] - a[0]) - u * (c[0] - a[0])) / det;
+    return [p, q, A1[k] - p * a[0] - q * a[1]];
+  };
+  const X = sol(0), Y = sol(1);
+  return (x, y) => [X[0] * x + X[1] * y + X[2], Y[0] * x + Y[1] * y + Y[2]];
+}
+// Ähnlichkeitsabbildung (Verschieben, Drehen, Skalieren) per kleinster Quadrate; liefert Abbildung + größten Rest
+function simFit(src, dst){
+  const n = src.length;
+  let mx = 0, my = 0, nx = 0, ny = 0;
+  for (let i = 0; i < n; i++){ mx += src[i][0]; my += src[i][1]; nx += dst[i][0]; ny += dst[i][1]; }
+  mx /= n; my /= n; nx /= n; ny /= n;
+  let sxx = 0, sab = 0, sba = 0;
+  for (let i = 0; i < n; i++){
+    const x = src[i][0] - mx, y = src[i][1] - my, u = dst[i][0] - nx, v = dst[i][1] - ny;
+    sxx += x * x + y * y; sab += x * u + y * v; sba += x * v - y * u;
+  }
+  if (sxx < 1e-9) return null;
+  const a = sab / sxx, b = sba / sxx;
+  const f = (x, y) => [a * (x - mx) - b * (y - my) + nx, b * (x - mx) + a * (y - my) + ny];
+  let res = 0;
+  for (let i = 0; i < n; i++){ const q = f(src[i][0], src[i][1]); res = Math.max(res, Math.hypot(q[0] - dst[i][0], q[1] - dst[i][1])); }
+  return { f, res };
+}
+// Fehltreffer aussortieren (nur verankert):
+// 1) Von Bild zu Bild bewegen sich die Punkte gemeinsam (fast eine Ähnlichkeitsabbildung). Die Dreiergruppe,
+//    die am besten zur letzten angenommenen Lage passt, bestimmt die Bewegung; ein Punkt, der davon um mehr
+//    als die Toleranz abweicht, gilt als "nicht gesehen".
+// 2) Ein Punkt zählt erst, wenn er 3 Bilder hintereinander stimmig war (schützt vor Gegenständen, die nach
+//    dem Verdecken eines Punktes an seiner Stelle vorbeiziehen). Während ein Punkt fehlt, bleibt die
+//    letzte angenommene Lage der Vergleich – ein vorbeiziehender Gegenstand passt dann nicht lange.
+// 3) Passt keine Dreiergruppe: Bild verwerfen (Lage halten). Sind mehrere verworfene Bilder untereinander
+//    stimmig (schnelle echte Bewegung), wird nach 4 Bildern neu übernommen.
+// 4) Großer Sprung oder starke Größenänderung: erst übernehmen, wenn das nächste Bild ihn bestätigt.
+let mkSeen = {}, mkRejectRun = 0, mkRejectPrev = null;
+function mkPlausible(found){
+  const vw = cam.videoWidth, k = vw / 1280;
+  if (!anchorAcc){                                   // erste Erkennung nach Neustart
+    if (found.length === 4){ for (let l = 1; l <= 4; l++) mkSeen[l] = 3; return mkAccept(found); }
+    return found;
+  }
+  const last = [1, 2, 3, 4].map(l => anchorAcc[l]);
+  const size = quadPerim(last.map(p => [p.x, p.y])) / 4;
+  const tol = 0.006 * size + 2 * k;
+  const pres = found.map(f => ({ f, L: [anchorAcc[f.label].x, anchorAcc[f.label].y], C: [f.x, f.y] }));
+  // beste Dreiergruppe (bzw. alle 3, wenn nur 3 da sind)
+  let inl = null, fitBest = Infinity;
+  const groups = pres.length === 4 ? [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]] : pres.length === 3 ? [[0, 1, 2]] : [];
+  for (const g of groups){
+    const sf = simFit(g.map(i => pres[i].L), g.map(i => pres[i].C));
+    if (sf && sf.res < fitBest){ fitBest = sf.res; inl = sf; }
+  }
+  const consistent = new Set();
+  if (inl && fitBest <= tol){
+    for (const p of pres){ const q = inl.f(p.L[0], p.L[1]); if (Math.hypot(q[0] - p.C[0], q[1] - p.C[1]) <= tol) consistent.add(p.f.label); }
+  }
+  for (let l = 1; l <= 4; l++) mkSeen[l] = consistent.has(l) ? (mkSeen[l] || 0) + 1 : 0;
+  const usable = found.filter(f => consistent.has(f.label) && mkSeen[f.label] >= 3);
+  if (pres.length === 4 && consistent.size === 3) mkStat.outliers++;
+  if (pres.length === 4 && consistent.size < 3){
+    // keine stimmige Dreiergruppe: schnelle echte Bewegung oder Fehltreffer
+    const C = found.map(f => [f.x, f.y]);
+    const prevOk = mkRejectPrev && (simFit(mkRejectPrev, C) || { res: Infinity }).res <= tol * 2;
+    mkRejectRun = prevOk ? mkRejectRun + 1 : 1;
+    mkRejectPrev = C;
+    if (mkRejectRun >= 4 && quadValid(C)){
+      mkRejectRun = 0; mkRejectPrev = null;
+      for (const f of found){ delete mkSm[f.label]; mkSeen[f.label] = 3; }
+      return mkAccept(found);
+    }
+    mkStat.rejected++;
+    return [];
+  }
+  mkRejectRun = 0; mkRejectPrev = null;
+  if (usable.length < 4) return usable;              // weniger als 4 stimmige Punkte: Foto hält
+  // Sprung- und Formprüfung gegen die letzte angenommene Lage
+  const C = usable.map(f => [f.x, f.y]);
+  const maxD = Math.max(...usable.map((f, i) => Math.hypot(f.x - last[i].x, f.y - last[i].y)));
+  const area = pts => { let s = 0; for (let i = 0; i < 4; i++){ const p = pts[i], q = pts[(i + 1) % 4]; s += p.x * q.y - q.x * p.y; } return s / 2; };
+  const ar = area(usable) / area(last);
+  if (!quadValid(C)){ mkStat.rejected++; return []; }
+  if (maxD > 0.15 * size || ar < 0.75 || ar > 1.33){
+    if (mkPending && usable.every((f, i) => Math.hypot(f.x - mkPending[i].x, f.y - mkPending[i].y) < 4 * k + 0.02 * size)){
+      mkPending = null;
+      for (const f of usable) delete mkSm[f.label];
+      return mkAccept(usable);
+    }
+    mkPending = usable.map(f => ({ x: f.x, y: f.y }));
+    mkStat.rejected++;
+    return [];
+  }
+  mkPending = null;
+  return mkAccept(usable);
+}
+function mkAccept(found){
+  const A = settings.marker.anchor, vw = cam.videoWidth;
+  if (found.length === 4 && (!A.r || !A.rPerim)){       // ältere Daten ohne gemerkte Punktgrößen
+    A.r = found.map(f => f.r / vw);
+    A.rPerim = quadPerim(found.map(f => [f.x / vw, f.y / vw]));
+  }
+  const acc = {};
+  for (const f of found) acc[f.label] = { x: f.x, y: f.y };
+  anchorPrevAcc = anchorAcc; anchorAcc = acc;
+  return found;
+}
+// One-Euro-Filter: im Stillstand stark glätten, bei Bewegung schnell folgen
+function mkSmooth(f, k){
+  const now = performance.now() / 1000;
+  let s = mkSm[f.label];
+  if (!s || s.miss > 15){ s = mkSm[f.label] = { x: f.x, y: f.y, dx: 0, dy: 0, t: now, miss: 0 }; return { x: f.x, y: f.y }; }
+  s.miss = 0;
+  const dt = Math.max(1 / 120, Math.min(0.5, now - s.t)); s.t = now;
+  const alpha = fc => { const tau = 1 / (2 * Math.PI * fc); return 1 / (1 + tau / dt); };
+  const vx = (f.x - s.x) / dt / k, vy = (f.y - s.y) / dt / k;            // Geschwindigkeit in px/s (1280er Maßstab)
+  const ad = alpha(1.0);
+  s.dx += ad * (vx - s.dx); s.dy += ad * (vy - s.dy);
+  const speed = Math.hypot(s.dx, s.dy);
+  const a = alpha(0.3 + 0.08 * speed);
+  s.x += a * (f.x - s.x); s.y += a * (f.y - s.y);
+  return { x: s.x, y: s.y };
+}
+
+/* ---------- Farbmaske zeigen (Prüfhilfe, nicht gespeichert) ---------- */
+let maskImg = null;
+function drawMask(mask, W, H){
+  if (maskCv.width !== W || maskCv.height !== H){ maskCv.width = W; maskCv.height = H; maskImg = null; }
+  const cx = maskCv.getContext('2d');
+  if (!maskImg) maskImg = cx.createImageData(W, H);
+  const d = new Uint32Array(maskImg.data.buffer), on = 0xFFFFE500 | 0, off = 0;   // Türkis (00 E5 FF), deckend
+  for (let i = 0; i < W * H; i++) d[i] = mask[i] ? on : off;
+  cx.putImageData(maskImg, 0, 0);
+}
+function applyMaskUi(){
+  maskCv.style.display = showMask && mkRunning ? 'block' : 'none';
+  $('mkMask').classList.toggle('on', showMask);
+  $('mkMask').setAttribute('aria-pressed', showMask);
+  if (mkWorker) mkWorker.postMessage({ type: 'req', req: mkReq() });
 }
 
 /* ---------- Verankern (Stufe 2): Foto folgt den 4 Markern ---------- */
 // Alle Lagen in normierten Kamera-Koordinaten (0..1 von Breite/Höhe des Kamerabilds).
-let anchorLast = null;   // Markerlage, zu der die aktuell gezeigte Fotolage gehört
 function markersNorm(){
   if (mkState.found.length !== 4 || !cam.videoWidth) return null;
   const vw = cam.videoWidth, vh = cam.videoHeight, out = [];
@@ -2138,6 +2552,7 @@ function anchorApply(){
   if (!cur) return;                                         // weniger als 4 Marker: letzte Lage halten
   const H = solveHomography(A.ref, cur);
   if (!H) return;
+  anchorH = H;
   const Qn = A.quad.map(([x, y]) => { const q = m3apply(H, x, y); return q ? [q.x, q.y] : null; });
   if (Qn.some(q => !q)) return;
   if (setPhotoQuadNorm(Qn)){ anchorLast = cur; scheduleSave(1500); }
@@ -2150,7 +2565,7 @@ function anchorRebase(){
   if (!base) return;
   A.ref = base.map(c => c.slice());
   A.quad = photoQuadNorm();
-  anchorLast = base;
+  anchorLast = base; anchorH = ID3;
   scheduleSave();
 }
 function applyAnchorBtn(){
@@ -2164,12 +2579,18 @@ function applyAnchorBtn(){
 $('mkAnchor').addEventListener('click', () => {
   const A = settings.marker.anchor;
   if (A.on){
-    A.on = false; anchorLast = null;
+    A.on = false; anchorLast = null; anchorAcc = anchorPrevAcc = null; anchorH = null; mkPending = null;
     showToast('Gelöst – Foto bleibt an dieser Stelle');
   } else {
     const cur = mkRunning ? markersNorm() : null;
     if (!cur){ showToast('Verankern geht nur bei 4/4 Markern'); return; }
-    A.on = true; A.ref = cur; A.quad = photoQuadNorm(); anchorLast = cur;
+    A.on = true; A.ref = cur; A.quad = photoQuadNorm(); anchorLast = cur; anchorH = ID3; mkPending = null;
+    // Größe der 4 Punkte merken (gegen Fehltreffer), bezogen auf die Größe des Marker-Vierecks
+    const vw = cam.videoWidth, vh = cam.videoHeight;
+    A.r = [1, 2, 3, 4].map(l => (mkState.found.find(f => f.label === l) || { r: 0 }).r / vw);
+    A.rPerim = quadPerim(cur.map(p => [p[0], p[1] * vh / vw]));
+    anchorAcc = {}; anchorPrevAcc = null;
+    for (const f of mkState.found) anchorAcc[f.label] = { x: f.x, y: f.y };
     showToast('Verankert');
   }
   applyLinesPanel(); applyMarkerChip(); scheduleSave();
@@ -2247,29 +2668,27 @@ function applyMarkerChip(){
 }
 // Erkennung nur, wenn Marker an, Farbe angelernt, Kamera läuft und App sichtbar (Akku)
 function mkWanted(){ return settings.marker.on && !!settings.marker.color && !!stream && !document.hidden; }
+function mkResetTracking(){
+  mkState.found = []; mkState.prev = null; mkTracks = []; mkSm = {}; mkLastFull = 0; mkLost = 0; mkPending = null;
+  anchorAcc = anchorPrevAcc = null; anchorH = null; mkSeen = {}; mkRejectRun = 0; mkRejectPrev = null;
+}
 function mkUpdateLoop(){
   if (mkWanted()){
-    if (!mkRunning){ mkRunning = true; mkCount = 0; mkCountT = 0; mkState.fps = 0; mkSchedule(); }
-  } else {
-    mkRunning = false; mkState.found = []; mkState.prev = null;
-    mkTracks = []; mkSmooth = {}; mkLastFull = 0;
+    if (!mkRunning){
+      mkRunning = true; mkCount = 0; mkCountT = 0; mkState.fps = 0; mkMsAvg = 0;
+      mkResetTracking();
+      const forced = window.__mkForceWay && MK_WAYS.find(w => w.id === window.__mkForceWay);
+      const saved = mkLoadPerf();
+      if (forced) mkStartWay(forced);
+      else if (saved) mkStartWay(MK_WAYS.find(w => w.id === saved.pick));
+      else mkMeasureStart();
+    }
+  } else if (mkRunning || mkWorker || mkLow){
+    mkRunning = false; mkGen++; mkWay = null; mkMeasure.active = false;
+    mkWorkerStop(); mkLowStop(); mkResetTracking();
   }
+  applyMaskUi();
   markerDraw();
-}
-function mkSchedule(){
-  if (!mkRunning) return;
-  if (cam.requestVideoFrameCallback) cam.requestVideoFrameCallback(mkTick);
-  else requestAnimationFrame(mkTick);
-}
-function mkTick(){
-  if (!mkRunning) return;
-  const now = performance.now();
-  // Abstand: mind. 25 ms (bei 30 Bildern/s jedes Bild) und mind. das 2,5-Fache der Rechenzeit, damit die App flüssig bleibt
-  if (now - mkLast >= Math.max(25, mkMsAvg * 2.5)){
-    mkLast = now;
-    try { mkProcess(); } catch(e){ /* ein fehlerhaftes Bild überspringen */ }
-  }
-  mkSchedule();
 }
 document.addEventListener('visibilitychange', () => mkUpdateLoop());
 
@@ -2313,14 +2732,22 @@ function learnAt(pt){
     if (col.s < 0.15) showMsg('Diese Stelle hat kaum Farbe. Für Marker eine kräftige Farbe nehmen (z. B. Grün oder Pink).', false);
     settings.marker.color = col;
     settings.marker.on = true;             // Anlernen schaltet die Marker ein
-    mkState.prev = null; mkTracks = []; mkSmooth = {};
+    mkResetTracking();
+    if (mkWorker){ mkBuildLut(); mkWorker.postMessage({ type: 'lut', lut: mkLut }); }
     showToast('Farbe angelernt');
     applyLinesPanel(); mkUpdateLoop(); scheduleSave();
   } catch(e){ showMsg('Farbe konnte nicht gemessen werden.', false); }
 }
 $('mkOn').addEventListener('click', () => { settings.marker.on = !settings.marker.on; applyLinesPanel(); mkUpdateLoop(); scheduleSave(); });
-$('mkMinus').addEventListener('click', () => { settings.marker.tol = Math.max(1, settings.marker.tol - 1); applyLinesPanel(); scheduleSave(); });
-$('mkPlus').addEventListener('click', () => { settings.marker.tol = Math.min(10, settings.marker.tol + 1); applyLinesPanel(); scheduleSave(); });
+function mkLutChanged(){ if (mkBuildLut() && mkWorker) mkWorker.postMessage({ type: 'lut', lut: mkLut }); }
+$('mkMinus').addEventListener('click', () => { settings.marker.tol = Math.max(1, settings.marker.tol - 1); mkLutChanged(); applyLinesPanel(); scheduleSave(); });
+$('mkPlus').addEventListener('click', () => { settings.marker.tol = Math.min(10, settings.marker.tol + 1); mkLutChanged(); applyLinesPanel(); scheduleSave(); });
+$('mkMask').addEventListener('click', () => { showMask = !showMask; applyMaskUi(); });
+$('perfBtn').addEventListener('click', () => {
+  try { localStorage.removeItem(PERF_KEY); } catch(e){}
+  if (mkRunning) mkMeasureStart();
+  showToast(mkRunning ? 'Erkennung wird neu gemessen …' : 'Wird beim nächsten Marker-Start gemessen');
+});
 $('mkLearn').addEventListener('click', () => {
   if (learnMode){ learnMode = false; hideToast(); applyLinesPanel(); return; }
   if (!stream){ showMsg('Kamera zuerst starten (⋯ → Kamera starten).', false); return; }

@@ -2,7 +2,7 @@
 <!--
   Zeichenhilfe – Overlay und Perspektive
   Autor: Benjamin Dormoros
-  Version: siehe APP_VERSION im Skript (aktuell 0.4)
+  Version: siehe APP_VERSION im Skript (aktuell 0.5)
 
   Änderungsverlauf
   ----------------
@@ -32,6 +32,15 @@
                     Speicher-Kennung, Foto-Größe, dauerhaftem Speicher, "Foto entfernen" und
                     "Alles zurücksetzen" (mit eigener Bestätigung). Hinweis "Neue Version … geladen".
                     Ansicht-Begrenzung wird nicht mehr in die gespeicherten Werte zurückgeschrieben.
+  0.5 (2026-11-01)  Hilfslinien: Raster (2–12 quadratische Felder über die kurze Fotoseite, mittig,
+                    Farbe Weiß/Schwarz/Rot/Blau mit Kontur, "kräftig") und Horizontlinie (über die ganze
+                    Breite, Griffe zum Verschieben/Neigen, Einrasten bei 0° ±2°, Beschriftung).
+                    Dritter Modus "Linien" (1 Finger: Griffe, 2 Finger: Ansicht zoomen) mit Einstellfeld.
+                    Hilfslinien liegen im Foto-Koordinatensystem (ohne Foto: gedachte Fläche in
+                    Papiergröße), werden in einer Bildschirm-SVG (#guideSvg) gezeichnet, deren Gruppe
+                    dieselbe Ansicht- und Foto-Transformation bekommt; Strichstärke bleibt konstant
+                    (vector-effect: non-scaling-stroke). Gespeichert in settings.guides.
+                    Info-Fenster: "Daten" oben, "Diagnose" einklappbar.
 
   VERSIONSNUMMER: wird NUR hier in APP_VERSION gepflegt. sw.js erhält sie über die Adresse
   (./sw.js?v=APP_VERSION) und benennt damit seinen Cache. Zusätzliche Dateien neben index.html:
@@ -45,7 +54,10 @@
          ├ #cam         Kamerabild
          ├ #photoLayer  FOTO-Transformation (nur das Foto verschieben/zoomen/drehen)
          │   └ #photo
-         └ #guides      Platz für Hilfslinien (Raster, Horizont, Fluchtpunkte)
+         └ #guides      (leer, Platzhalter aus 0.1)
+  #guideSvg     Hilfslinien über der ganzen Bildschirmfläche. Gruppe #gPhoto trägt rechnerisch
+                dieselbe Transformation wie Ansicht × Papier × Foto (siehe guideMatrix()),
+                #gScreen enthält Horizont, Beschriftung und Griffe in Bildschirm-Koordinaten.
 -->
 <html lang="de">
 <head>
@@ -159,14 +171,38 @@
   }
 
   /* ---------- Querformat: Leiste rechts ---------- */
+  /* ---------- Hilfslinien ---------- */
+  #guideSvg{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:hidden; }
+  #guideSvg .nss{ vector-effect:non-scaling-stroke; fill:none; stroke-linecap:butt; }
+  #guideSvg .hLbl{ font:600 12px system-ui, sans-serif; paint-order:stroke; stroke:rgba(0,0,0,.6); stroke-width:3px; }
+  #guideSvg .handle{ fill:rgba(255,255,255,.18); stroke:rgba(255,255,255,.85); stroke-width:1.5px; }
+  #guideSvg .handle.mid{ fill:rgba(255,196,0,.25); }
+  #linesPanel{ position:absolute; z-index:10; left:calc(8px + var(--sl)); right:calc(8px + var(--sr)); bottom:180px;
+               display:none; flex-direction:column; gap:6px; padding:6px; border-radius:12px;
+               background:var(--bar-bg); -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+               touch-action:manipulation; max-width:420px; margin:0 auto; }
+  #linesPanel.show{ display:flex; }
+  #linesPanel .row{ display:flex; gap:5px; align-items:center; }
+  #linesPanel .btn{ padding:0 8px; font-size:13px; }
+  #linesPanel .tog.on{ background:var(--accent); color:#00213f; font-weight:700; }
+  .stepper{ display:flex; align-items:center; gap:2px; }
+  .stepper .btn{ padding:0; width:44px; font-size:20px; }
+  #gN{ min-width:58px; text-align:center; font-size:13px; font-variant-numeric:tabular-nums; }
+  .sw{ width:44px; min-width:44px; padding:0 !important; display:flex; align-items:center; justify-content:center; }
+  .sw i{ display:block; width:20px; height:20px; border-radius:50%; box-shadow:0 0 0 2px rgba(255,255,255,.35); }
+  .sw.on{ box-shadow: inset 0 0 0 2px var(--accent); }
+  .grow{ flex:1; }
+
   @media (orientation: landscape){
     #bar{
-      top:0; bottom:0; left:auto; right:0; width:calc(160px + var(--sr));
-      grid-template-columns:repeat(2, 1fr); align-content:center; gap:6px;
+      top:0; bottom:0; left:auto; right:0; width:calc(204px + var(--sr));
+      grid-template-columns:repeat(3, 1fr); align-content:center; gap:5px;
       padding:calc(8px + var(--st)) calc(8px + var(--sr)) calc(8px + var(--sb)) 8px;
       overflow-y:auto;
     }
-    .seg .btn{ padding:0 4px; font-size:13px; }
+    .seg{ flex-direction:column; }
+    .seg .btn{ padding:0 4px; font-size:13px; min-height:40px; }
+    #linesPanel{ left:calc(8px + var(--sl)); right:auto; bottom:calc(8px + var(--sb)); width:380px; margin:0; }
     .opacity{ flex-wrap:wrap; padding:0; gap:0 6px; }
     .opacity label{ flex:1; }
     .opacity input[type=range]{ flex:1 1 100%; order:3; }
@@ -192,6 +228,9 @@
   }
   #info.show{ display:block; }
   #info h2{ margin:0 0 10px; font-size:17px; }
+  #diagBox{ margin-top:14px; }
+  #diagBox summary{ min-height:44px; display:flex; align-items:center; cursor:pointer; font-size:13px;
+                    text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
   #info h3{ margin:16px 0 4px; font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
   .infoBtns{ display:flex; gap:8px; margin-top:10px; }
   .infoBtns .btn{ flex:1; font-size:14px; padding:0 8px; }
@@ -221,6 +260,22 @@
       <div id="guides"></div>
     </div>
   </div>
+  <svg id="guideSvg" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <g id="gPhoto">
+      <path id="gridShadow" class="nss" d=""/>
+      <path id="gridLine" class="nss" d=""/>
+    </g>
+    <g id="gScreen">
+      <path id="horShadow" fill="none" stroke="rgba(0,0,0,.55)" stroke-width="4" d=""/>
+      <path id="horLine" fill="none" stroke="#ffc400" stroke-width="2" d=""/>
+      <text id="horLbl" class="hLbl" fill="#ffc400">Horizont</text>
+      <g id="handles">
+        <circle id="hMid" class="handle mid" r="10"/>
+        <circle id="hEndA" class="handle" r="9"/>
+        <circle id="hEndB" class="handle" r="9"/>
+      </g>
+    </g>
+  </svg>
   <div id="hint">Tippe auf „Kamera starten“ und „Foto wählen“.</div>
 </div>
 
@@ -235,6 +290,7 @@
 <div id="bar">
   <div class="seg" role="group" aria-label="Modus">
     <button id="modeAlign" class="btn active" aria-pressed="true">Ausrichten</button>
+    <button id="modeLines" class="btn" aria-pressed="false">Linien</button>
     <button id="modeDraw" class="btn" aria-pressed="false">Zeichnen</button>
   </div>
   <button id="camBtn" class="btn ibtn" title="Kamera starten">
@@ -271,6 +327,25 @@
     <span id="opVal">50 %</span>
   </div>
 </div>
+<div id="linesPanel" role="group" aria-label="Hilfslinien">
+  <div class="row">
+    <button id="gGrid" class="btn tog" aria-pressed="false">Raster</button>
+    <div class="stepper">
+      <button id="gMinus" class="btn" aria-label="Weniger Felder">−</button>
+      <span id="gN">4 Felder</span>
+      <button id="gPlus" class="btn" aria-label="Mehr Felder">+</button>
+    </div>
+    <button id="gBold" class="btn tog grow" aria-pressed="false">Kräftig</button>
+  </div>
+  <div class="row">
+    <button class="btn sw" data-c="white" aria-label="Raster weiß"><i style="background:#fff"></i></button>
+    <button class="btn sw" data-c="black" aria-label="Raster schwarz"><i style="background:#000"></i></button>
+    <button class="btn sw" data-c="red" aria-label="Raster rot"><i style="background:#ff3b30"></i></button>
+    <button class="btn sw" data-c="blue" aria-label="Raster blau"><i style="background:#2f7bff"></i></button>
+    <button id="gHor" class="btn tog grow" aria-pressed="false">Horizont</button>
+    <button id="gLevel" class="btn grow">Waagrecht</button>
+  </div>
+</div>
 <input id="file" type="file" accept="image/*">
 
 <div id="toast" role="status"></div>
@@ -278,8 +353,6 @@
 
 <div id="info" role="dialog" aria-label="Info">
   <h2>Info</h2>
-  <h3>Diagnose</h3>
-  <table><tbody id="infoBody"></tbody></table>
   <h3>Daten (nur auf diesem Gerät)</h3>
   <table><tbody id="dataBody"></tbody></table>
   <div class="infoBtns">
@@ -293,6 +366,10 @@
       <button id="confirmYes" class="btn danger">Ja, alles löschen</button>
     </div>
   </div>
+  <details id="diagBox">
+    <summary>Diagnose ▸</summary>
+    <table><tbody id="infoBody"></tbody></table>
+  </details>
   <button id="installBtn" class="btn">App installieren</button>
   <button id="infoClose" class="btn">Schließen</button>
 </div>
@@ -300,7 +377,7 @@
 <script>
 'use strict';
 /* ================= Version und Einstellungen ================= */
-const APP_VERSION = '0.4';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
+const APP_VERSION = '0.5';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
 const SETTINGS_FORMAT = 1;          // Format des Einstellungsobjekts; nur abwärtskompatibel ändern
 const STORAGE_KEY = 'zeichenhilfe.settings';
 
@@ -313,8 +390,16 @@ const settings = {
   photo: { opacity: 0.5, x: 0, y: 0, scale: 1, rotation: 0 },
   // Ansicht: cx/cy = Papierpunkt (Anteil 0..1) in der Bildschirmmitte, scale = Zoom 1..5
   view:  { cx: 0.5, cy: 0.5, scale: 1 },
-  ui:    { barVisible: true, mode: 'align', locked: false, orientFixed: false }   // locked wird NICHT gespeichert
+  ui:    { barVisible: true, mode: 'align', locked: false, orientFixed: false },  // locked wird NICHT gespeichert
+  // Hilfslinien im Foto-Koordinatensystem. Einheit: kurze Fotoseite = 1, Ursprung = Fotomitte.
+  guides: {
+    grid:    { on: false, n: 4, color: 'white', bold: false },
+    horizon: { on: false, u: 0, v: 0, angle: 0 }   // Punkt auf der Linie (u,v) + Winkel im Foto (Grad)
+  }
 };
+const GRID_COLORS = { white: '#ffffff', black: '#000000', red: '#ff3b30', blue: '#2f7bff' };
+const GRID_N_MIN = 2, GRID_N_MAX = 12;
+const HOR_SNAP_DEG = 2;
 const VIEW_MIN = 1, VIEW_MAX = 5;
 const PHOTO_MIN = 0.05, PHOTO_MAX = 20;
 const SNAP_DEG = 3;
@@ -340,7 +425,8 @@ function saveSettings(){
     formatVersion: SETTINGS_FORMAT, appVersion: APP_VERSION,
     photo: { opacity: p.opacity, x: p.x, y: p.y, scale: p.scale, rotation: p.rotation },
     view:  { cx: v.cx, cy: v.cy, scale: v.scale },
-    ui:    { barVisible: u.barVisible, mode: u.mode, orientFixed: u.orientFixed }
+    ui:    { barVisible: u.barVisible, mode: u.mode, orientFixed: u.orientFixed },
+    guides: JSON.parse(JSON.stringify(settings.guides))
   });
 }
 // Gespeicherte Werte übernehmen. Fehlende/ungültige Felder behalten den Standardwert.
@@ -361,7 +447,16 @@ function mergeSettings(raw){
   S.view.cy        = num(v.cy, -1, 2, S.view.cy);
   S.view.scale     = num(v.scale, VIEW_MIN, VIEW_MAX, S.view.scale);
   if (typeof u.barVisible === 'boolean') S.ui.barVisible = u.barVisible;
-  if (u.mode === 'align' || u.mode === 'draw') S.ui.mode = u.mode;
+  if (u.mode === 'align' || u.mode === 'draw' || u.mode === 'lines') S.ui.mode = u.mode;
+  const g = obj(raw.guides), gg = obj(g.grid), gh = obj(g.horizon);
+  if (typeof gg.on === 'boolean') S.guides.grid.on = gg.on;
+  S.guides.grid.n = Math.round(num(gg.n, GRID_N_MIN, GRID_N_MAX, S.guides.grid.n));
+  if (typeof gg.color === 'string' && GRID_COLORS[gg.color]) S.guides.grid.color = gg.color;
+  if (typeof gg.bold === 'boolean') S.guides.grid.bold = gg.bold;
+  if (typeof gh.on === 'boolean') S.guides.horizon.on = gh.on;
+  S.guides.horizon.u     = num(gh.u, -100, 100, S.guides.horizon.u);
+  S.guides.horizon.v     = num(gh.v, -100, 100, S.guides.horizon.v);
+  S.guides.horizon.angle = num(gh.angle, -360, 360, S.guides.horizon.angle);
   if (typeof u.orientFixed === 'boolean') S.ui.orientFixed = u.orientFixed;
   return true;
 }
@@ -425,7 +520,7 @@ const photoLayer = $('photoLayer'), photo = $('photo'), hint = $('hint');
 const bar = $('bar'), camBtn = $('camBtn'), photoBtn = $('photoBtn'), fileIn = $('file');
 const opacity = $('opacity'), opVal = $('opVal'), infoBtn = $('infoBtn');
 const resetBtn = $('resetBtn'), lockBtn = $('lockBtn'), fsBtn = $('fsBtn');
-const modeAlign = $('modeAlign'), modeDraw = $('modeDraw');
+const modeAlign = $('modeAlign'), modeDraw = $('modeDraw'), modeLines = $('modeLines');
 const chipMode = $('chipMode'), chipLock = $('chipLock'), chipZoom = $('chipZoom');
 const msg = $('msg'), msgText = $('msgText'), info = $('info'), infoBody = $('infoBody'), dataBody = $('dataBody');
 $('ver').textContent = 'v' + APP_VERSION;
@@ -462,6 +557,7 @@ function layout(){
   fitPhoto();
   applyPhotoTransform();
   applyViewTransform();
+  if (typeof applyLinesPanel === 'function' && linesPanel) applyLinesPanel();
 }
 
 // Grundgröße: Foto so groß wie möglich, ganz sichtbar, mittig in der Papier-Ebene
@@ -478,6 +574,7 @@ function applyPhotoTransform(){
   photoLayer.style.transform =
     `translate(${p.x * P.w}px, ${p.y * P.h}px) rotate(${p.rotation}deg) scale(${p.scale})`;
   photo.style.opacity = p.opacity;
+  updateGuides();
 }
 
 // Ansicht begrenzen: Papier darf nicht vom Rand weggeschoben werden; ist es kleiner als der
@@ -514,6 +611,7 @@ function applyViewTransform(){
   const z = V.s;
   chipZoom.textContent = z.toFixed(1).replace('.', ',') + '×';
   chipZoom.classList.toggle('hide', z <= 1.001);
+  updateGuides();
 }
 
 function updateHint(){
@@ -530,6 +628,174 @@ window.addEventListener('resize', scheduleLayout);
 window.addEventListener('orientationchange', scheduleLayout);
 cam.addEventListener('loadedmetadata', scheduleLayout);
 cam.addEventListener('resize', scheduleLayout);   // Kamerabild ändert Maße (z. B. beim Drehen)
+
+/* ================= Hilfslinien ================= */
+const guideSvg = $('guideSvg'), gPhoto = $('gPhoto');
+const gridShadow = $('gridShadow'), gridLine = $('gridLine');
+const horShadow = $('horShadow'), horLine = $('horLine'), horLbl = $('horLbl');
+const handlesG = $('handles'), hMid = $('hMid'), hEndA = $('hEndA'), hEndB = $('hEndB');
+const linesPanel = $('linesPanel');
+let gridKey = '';
+const HANDLE_DIST = 90;      // Abstand der Endgriffe vom Mittelgriff (Bildschirm-px)
+const HANDLE_HIT = 26;       // Greif-Radius (≈ 52 px Fläche)
+
+// Fotofläche in "passt hinein"-Größe (ohne Foto: gedachte Fläche = Papier)
+function photoFrame(){
+  let fw = P.w, fh = P.h;
+  if (photo.naturalWidth){
+    const k = Math.min(P.w / photo.naturalWidth, P.h / photo.naturalHeight);
+    fw = photo.naturalWidth * k; fh = photo.naturalHeight * k;
+  }
+  const s0 = Math.max(1e-6, Math.min(fw, fh));
+  return { s0, aw: fw / s0, ah: fh / s0 };   // aw/ah = Seitenlängen in Einheiten der kurzen Seite
+}
+// Abbildung Foto-Einheiten -> Bildschirm: Bildschirm = T + s × (Papierursprung + Fotomitte + R·k·(a,b))
+function guideMatrix(){
+  const p = settings.photo, F = photoFrame();
+  const k = p.scale * F.s0, r = p.rotation * Math.PI / 180;
+  const cx = P.left + P.w / 2 + p.x * P.w, cy = P.top + P.h / 2 + p.y * P.h;
+  const c = Math.cos(r) * k * V.s, sn = Math.sin(r) * k * V.s;
+  // Matrix [a c e; b d f] im SVG-Sinne
+  return { a: c, b: sn, c: -sn, d: c, e: V.tx + V.s * cx, f: V.ty + V.s * cy, F };
+}
+function photoToScreen(M, u, v){ return { x: M.a * u + M.c * v + M.e, y: M.b * u + M.d * v + M.f }; }
+function screenToPhoto(M, x, y){
+  const det = M.a * M.d - M.b * M.c, dx = x - M.e, dy = y - M.f;
+  return { u: ( M.d * dx - M.c * dy) / det, v: (-M.b * dx + M.a * dy) / det };
+}
+// Raster nur neu aufbauen, wenn sich Felderzahl oder Seitenverhältnis ändern
+function buildGrid(F){
+  const n = settings.guides.grid.n, c = 1 / n, odd = n % 2 === 1;
+  const key = n + '|' + F.aw.toFixed(5) + '|' + F.ah.toFixed(5);
+  if (key === gridKey) return;
+  gridKey = key;
+  const pos = half => {                          // Linienpositionen entlang einer Achse
+    const out = [-half, half];
+    for (let k = odd ? 0.5 : 0; k * c < half - 1e-6; k++){
+      out.push(k * c); if (k !== 0) out.push(-k * c);
+    }
+    return [...new Set(out.map(x => +x.toFixed(6)))].sort((a, b) => a - b);
+  };
+  const hw = F.aw / 2, hh = F.ah / 2;
+  let d = '';
+  for (const x of pos(hw)) d += `M${x} ${-hh}L${x} ${hh}`;
+  for (const y of pos(hh)) d += `M${-hw} ${y}L${hw} ${y}`;
+  gridShadow.setAttribute('d', d); gridLine.setAttribute('d', d);
+}
+function applyGridStyle(){
+  const g = settings.guides.grid, w = g.bold ? 2.2 : 1;
+  gridLine.setAttribute('stroke', GRID_COLORS[g.color]);
+  gridLine.setAttribute('stroke-width', w);
+  gridShadow.setAttribute('stroke', g.color === 'black' ? 'rgba(255,255,255,.55)' : 'rgba(0,0,0,.55)');
+  gridShadow.setAttribute('stroke-width', w + 2);
+  gridKey = '';                                 // Felderzahl kann sich geändert haben
+}
+// Horizont in Bildschirm-Koordinaten: Punkt m (Lot vom Bildschirmmittelpunkt) + Richtung
+function horizonScreen(M){
+  const h = settings.guides.horizon;
+  const p0 = photoToScreen(M, h.u, h.v);
+  const ang = (h.angle + settings.photo.rotation) * Math.PI / 180;
+  const dx = Math.cos(ang), dy = Math.sin(ang);
+  const sx = stage.clientWidth / 2, sy = stage.clientHeight / 2;
+  const t = (sx - p0.x) * dx + (sy - p0.y) * dy;
+  return { m: { x: p0.x + t * dx, y: p0.y + t * dy }, dx, dy, ang };
+}
+function updateGuides(){
+  if (!P.w) return;
+  const G = settings.guides, M = guideMatrix();
+  // Raster
+  gPhoto.style.display = G.grid.on ? '' : 'none';
+  if (G.grid.on){
+    buildGrid(M.F);
+    gPhoto.setAttribute('transform', `matrix(${M.a} ${M.b} ${M.c} ${M.d} ${M.e} ${M.f})`);
+  }
+  // Horizont
+  const showH = G.horizon.on;
+  for (const el of [horShadow, horLine, horLbl]) el.style.display = showH ? '' : 'none';
+  handlesG.style.display = (showH && settings.ui.mode === 'lines' && !settings.ui.locked) ? '' : 'none';
+  if (!showH) return;
+  const H = horizonScreen(M), L = 4 * Math.max(stage.clientWidth, stage.clientHeight);
+  const d = `M${H.m.x - H.dx * L} ${H.m.y - H.dy * L}L${H.m.x + H.dx * L} ${H.m.y + H.dy * L}`;
+  horShadow.setAttribute('d', d); horLine.setAttribute('d', d);
+  // Beschriftung neben dem Mittelpunkt, immer lesbar (nicht kopfüber)
+  let deg = H.ang * 180 / Math.PI; deg = ((deg % 360) + 540) % 360 - 180;
+  const flip = (deg > 90 || deg < -90) ? -1 : 1;
+  const lx = H.m.x + H.dx * 34 * flip + H.dy * 6, ly = H.m.y + H.dy * 34 * flip - H.dx * 6;
+  horLbl.setAttribute('x', lx); horLbl.setAttribute('y', ly);
+  horLbl.setAttribute('transform', `rotate(${flip < 0 ? deg + 180 : deg} ${lx} ${ly})`);
+  horLbl.setAttribute('dy', '-4');
+  hMid.setAttribute('cx', H.m.x); hMid.setAttribute('cy', H.m.y);
+  hEndA.setAttribute('cx', H.m.x - H.dx * HANDLE_DIST); hEndA.setAttribute('cy', H.m.y - H.dy * HANDLE_DIST);
+  hEndB.setAttribute('cx', H.m.x + H.dx * HANDLE_DIST); hEndB.setAttribute('cy', H.m.y + H.dy * HANDLE_DIST);
+}
+// Griff unter dem Finger finden
+function hitHandle(pt){
+  if (!settings.guides.horizon.on) return null;
+  const H = horizonScreen(guideMatrix());
+  const cand = [
+    { type: 'mid', x: H.m.x, y: H.m.y },
+    { type: 'end', sign: -1, x: H.m.x - H.dx * HANDLE_DIST, y: H.m.y - H.dy * HANDLE_DIST },
+    { type: 'end', sign:  1, x: H.m.x + H.dx * HANDLE_DIST, y: H.m.y + H.dy * HANDLE_DIST }
+  ];
+  let best = null, bd = HANDLE_HIT;
+  for (const c of cand){ const d = Math.hypot(pt.x - c.x, pt.y - c.y); if (d <= bd){ bd = d; best = c; } }
+  if (!best) return null;
+  return { type: best.type, sign: best.sign || 0, last: { x: pt.x, y: pt.y }, pivot: { x: H.m.x, y: H.m.y } };
+}
+function snapHorizon(screenDeg){
+  let d = ((screenDeg % 180) + 270) % 180 - 90;   // auf (-90, 90] bringen
+  return Math.abs(d) <= HOR_SNAP_DEG ? screenDeg - d : screenDeg;
+}
+function moveLine(drag, pt){
+  const h = settings.guides.horizon, M = guideMatrix();
+  if (drag.type === 'mid'){
+    const p0 = photoToScreen(M, h.u, h.v);
+    const q = screenToPhoto(M, p0.x + pt.x - drag.last.x, p0.y + pt.y - drag.last.y);
+    h.u = q.u; h.v = q.v;
+    drag.last = { x: pt.x, y: pt.y };
+  } else {
+    // Neigen um den Mittelgriff
+    const dx = (pt.x - drag.pivot.x) * drag.sign, dy = (pt.y - drag.pivot.y) * drag.sign;
+    if (Math.hypot(dx, dy) < 12) return;
+    const screenDeg = snapHorizon(Math.atan2(dy, dx) * 180 / Math.PI);
+    const q = screenToPhoto(M, drag.pivot.x, drag.pivot.y);
+    h.u = q.u; h.v = q.v;
+    let a = screenDeg - settings.photo.rotation;
+    h.angle = ((a % 360) + 540) % 360 - 180;
+  }
+  updateGuides();
+}
+
+/* ---------- Einstellfeld im Modus "Linien" ---------- */
+function applyLinesPanel(){
+  const G = settings.guides;
+  const show = settings.ui.mode === 'lines' && settings.ui.barVisible;
+  linesPanel.classList.toggle('show', show);
+  const tog = (el, on) => { el.classList.toggle('on', on); el.setAttribute('aria-pressed', on); };
+  tog($('gGrid'), G.grid.on); tog($('gBold'), G.grid.bold); tog($('gHor'), G.horizon.on);
+  $('gN').textContent = G.grid.n + ' Felder';
+  $('gMinus').disabled = G.grid.n <= GRID_N_MIN; $('gPlus').disabled = G.grid.n >= GRID_N_MAX;
+  linesPanel.querySelectorAll('.sw').forEach(b => b.classList.toggle('on', b.dataset.c === G.grid.color));
+  $('gLevel').disabled = !G.horizon.on;
+  if (show) positionLinesPanel();
+}
+function positionLinesPanel(){
+  const land = matchMedia('(orientation: landscape)').matches;
+  linesPanel.style.bottom = land ? '' : (bar.offsetHeight + 8) + 'px';
+}
+function guidesChanged(){ applyGridStyle(); applyLinesPanel(); updateGuides(); scheduleSave(); }
+$('gGrid').addEventListener('click', () => { settings.guides.grid.on = !settings.guides.grid.on; guidesChanged(); });
+$('gBold').addEventListener('click', () => { settings.guides.grid.bold = !settings.guides.grid.bold; guidesChanged(); });
+$('gMinus').addEventListener('click', () => { settings.guides.grid.n = Math.max(GRID_N_MIN, settings.guides.grid.n - 1); guidesChanged(); });
+$('gPlus').addEventListener('click', () => { settings.guides.grid.n = Math.min(GRID_N_MAX, settings.guides.grid.n + 1); guidesChanged(); });
+linesPanel.querySelectorAll('.sw').forEach(b => b.addEventListener('click', () => { settings.guides.grid.color = b.dataset.c; guidesChanged(); }));
+$('gHor').addEventListener('click', () => { settings.guides.horizon.on = !settings.guides.horizon.on; guidesChanged(); });
+$('gLevel').addEventListener('click', () => {
+  // waagrecht auf dem Papier: Winkel im Foto = −Fotodrehung
+  const a = -settings.photo.rotation;
+  settings.guides.horizon.angle = ((a % 360) + 540) % 360 - 180;
+  guidesChanged();
+});
 
 /* ================= Gesten ================= */
 const pointers = new Map();   // id -> {x,y} aktuelle Bildschirmposition (Stage-lokal)
@@ -550,7 +816,7 @@ function snapRot(deg){
 }
 
 function gesturesBlocked(){
-  if (settings.ui.locked) return true;
+  if (settings.ui.locked) return true;   // Sperre gilt für alle drei Modi
   if (settings.ui.mode === 'align' && !photo.naturalWidth) return true;   // ohne Foto nichts auszurichten
   return false;
 }
@@ -571,8 +837,13 @@ function endGesture(){
 function applyMove(prev, cur){
   const ids = [...cur.keys()].filter(id => prev.has(id)).slice(0, 2);
   if (!ids.length) return;
-  if (settings.ui.mode === 'align') moveAlign(ids, prev, cur);
-  else moveDraw(ids, prev, cur);
+  const m = settings.ui.mode;
+  if (m === 'align') moveAlign(ids, prev, cur);
+  else if (m === 'draw') moveDraw(ids, prev, cur);
+  else {                                         // Linien: 2 Finger = Ansicht, 1 Finger = Griff
+    if (ids.length === 2){ if (gesture) gesture.lineDrag = null; moveDraw(ids, prev, cur); }
+    else if (gesture && gesture.lineDrag) moveLine(gesture.lineDrag, cur.get(ids[0]));
+  }
 }
 
 function moveAlign(ids, prev, cur){
@@ -640,6 +911,9 @@ stage.addEventListener('pointerdown', e => {
   try { stage.setPointerCapture(e.pointerId); } catch(err){}
   pointers.set(e.pointerId, stagePoint(e));
   startGestureIfNeeded();
+  if (settings.ui.mode === 'lines'){
+    gesture.lineDrag = (pointers.size === 1) ? hitHandle(stagePoint(e)) : null;
+  }
   if (pointers.size === 1) tapInfo = { t: performance.now(), p: stagePoint(e), moved: false };
   else tapInfo = null;
 });
@@ -671,10 +945,13 @@ stage.addEventListener('pointercancel', pointerEnd);
 
 /* ================= Modus, Sperre ================= */
 function applyUi(){
-  const align = settings.ui.mode === 'align';
-  modeAlign.classList.toggle('active', align);  modeAlign.setAttribute('aria-pressed', align);
-  modeDraw.classList.toggle('active', !align);  modeDraw.setAttribute('aria-pressed', !align);
-  chipMode.textContent = align ? 'Ausrichten' : 'Zeichnen';
+  const m = settings.ui.mode, align = m === 'align';
+  for (const [btn, key] of [[modeAlign, 'align'], [modeLines, 'lines'], [modeDraw, 'draw']]){
+    btn.classList.toggle('active', m === key); btn.setAttribute('aria-pressed', m === key);
+  }
+  chipMode.textContent = align ? 'Ausrichten' : m === 'lines' ? 'Linien' : 'Zeichnen';
+  applyLinesPanel();
+  updateGuides();
   resetBtn.disabled = !align;
   const L = settings.ui.locked;
   lockBtn.classList.toggle('locked', L);
@@ -692,6 +969,7 @@ function setMode(m){
 }
 modeAlign.addEventListener('click', () => setMode('align'));
 modeDraw.addEventListener('click', () => setMode('draw'));
+modeLines.addEventListener('click', () => setMode('lines'));
 lockBtn.addEventListener('click', () => {
   settings.ui.locked = !settings.ui.locked;
   pointers.clear(); endGesture();
@@ -871,6 +1149,7 @@ function clearPhotoDisplay(){
   photo.style.display = 'none';
   if (photoUrl){ URL.revokeObjectURL(photoUrl); photoUrl = null; }
   updateHint();
+  updateGuides();                        // Hilfslinien beziehen sich jetzt auf die gedachte Papierfläche
 }
 fileIn.addEventListener('change', async () => {
   const f = fileIn.files && fileIn.files[0];
@@ -903,6 +1182,7 @@ opacity.addEventListener('input', () => { setOpacity(+opacity.value); scheduleSa
 function applyBar(){
   bar.classList.toggle('hidden', !settings.ui.barVisible);
   $('barToggle').textContent = settings.ui.barVisible ? '✕' : '☰';
+  applyLinesPanel();
 }
 $('barToggle').addEventListener('click', () => { settings.ui.barVisible = !settings.ui.barVisible; applyBar(); scheduleSave(); });
 
@@ -1120,6 +1400,7 @@ mergeSettings(loadSettings());
 settings.ui.locked = false;              // immer entsperrt starten
 
 // 2) Oberfläche mit (wiederhergestellten) Werten aufbauen
+applyGridStyle();
 applyOrientUi();
 applyInstallUi();
 setOpacity(settings.photo.opacity * 100);

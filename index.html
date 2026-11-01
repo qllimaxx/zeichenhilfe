@@ -2,7 +2,7 @@
 <!--
   Zeichenhilfe – Overlay und Perspektive
   Autor: Benjamin Dormoros
-  Version: siehe APP_VERSION im Skript (aktuell 0.7)
+  Version: siehe APP_VERSION im Skript (aktuell 0.8)
 
   Änderungsverlauf
   ----------------
@@ -58,6 +58,14 @@
                     keine Versionsanzeige; Zoom-Anzeige nur kurz beim Zoomen; im Modus Zeichnen blendet
                     ein Tipp aufs Bild die Bedienung aus/ein (Doppeltippen = 1× bleibt); einfarbig weiß
                     auf dunklem, halbtransparentem Grund; Griffe als dünne Kreise.
+  0.8 (2026-11-01)  Fokus fixieren (Mehr-Menü; applyConstraints focusMode manual+focusDistance bzw.
+                    single-shot, frei = continuous; Wunsch gespeichert und beim Kamerastart still
+                    angewendet). Marker Stufe 1: Farbe anlernen (Tipp ins Kamerabild, Median in HSV),
+                    Empfindlichkeit 1–10, Erkennung auf verkleinertem Bild (320 px Breite) mit eigener
+                    Farbfilterung + zusammenhängenden Flecken + Größen-/Rundheitsfilter, max. 4 Marker in
+                    fester Reihenfolge (oben links, oben rechts, unten rechts, unten links), Anzeige als
+                    dünne Ringe mit Nummer und "n/4 Marker". Das Foto folgt den Markern noch NICHT.
+                    Diagnose: Fokus-Modi/-Entfernung, Erkennungen/s, ms pro Bild, Flecken vor Filter.
 
   VERSIONSNUMMER: wird NUR hier in APP_VERSION gepflegt. sw.js erhält sie über die Adresse
   (./sw.js?v=APP_VERSION) und benennt damit seinen Cache. Zusätzliche Dateien neben index.html:
@@ -207,7 +215,8 @@
   .mi.on::after{ content:""; width:5px; height:5px; border-radius:50%; background:#fff; }
   .mi.dot::after{ content:""; width:5px; height:5px; border-radius:50%; background:#fff; }
   /* Moduseinstellungen */
-  #modePanel{ width:216px; }
+  #modePanel{ width:240px; }
+  .pb, .sw{ flex:none; }
   .pt{ display:flex; align-items:center; width:100%; min-height:44px; padding:0 12px; border:0; border-radius:10px;
        background:none; color:var(--icon-off); text-align:left; cursor:pointer; }
   .pt:active, .pb:active{ background:var(--press); }
@@ -234,6 +243,15 @@
              padding:3px 8px; border-radius:10px; background:rgba(0,0,0,.35); color:rgba(255,255,255,.85);
              font-size:12px; font-variant-numeric:tabular-nums; pointer-events:none; transition:opacity .3s; }
   #chipZoom.hide{ opacity:0; }
+  /* Marker */
+  #markerG{ filter:drop-shadow(0 0 1px rgba(0,0,0,.85)); }   /* feiner dunkler Saum: Ring auch auf weißem Papier sichtbar */
+  #guideSvg .mring{ fill:none; stroke:rgba(255,255,255,.95); stroke-width:1.25px; }
+  #guideSvg .mnum{ font-size:10px; fill:#fff; paint-order:stroke; stroke:rgba(0,0,0,.45); stroke-width:2px; }
+  #markerChip{ position:absolute; z-index:9; left:calc(12px + var(--sl)); top:calc(12px + var(--st));
+               padding:3px 8px; border-radius:10px; background:rgba(0,0,0,.35); color:rgba(255,255,255,.85);
+               font-size:12px; font-variant-numeric:tabular-nums; pointer-events:none; display:none; }
+  #markerChip.show{ display:block; }
+  .mk-sw{ width:14px; height:14px; border-radius:50%; box-shadow:0 0 0 1px rgba(255,255,255,.4); }
 
   /* ---------- Meldungen, Info, Bestätigung ---------- */
   .btn{ min-height:44px; padding:0 14px; border:0; border-radius:12px; background:rgba(255,255,255,.08);
@@ -303,11 +321,16 @@
       <circle class="handle corner" r="7"/><circle class="handle corner" r="7"/>
       <circle class="handle corner" r="7"/><circle class="handle corner" r="7"/>
     </g>
+    <g id="markerG">
+      <circle class="mring" r="10"/><circle class="mring" r="10"/><circle class="mring" r="10"/><circle class="mring" r="10"/>
+      <text class="mnum">1</text><text class="mnum">2</text><text class="mnum">3</text><text class="mnum">4</text>
+    </g>
   </svg>
   <div id="hint">Foto wählen: Bild-Symbol rechts.<br>Kamera: ⋯ → Kamera starten.</div>
 </div>
 
 <div id="chipZoom" class="hide">1×</div>
+<div id="markerChip">0/4 Marker</div>
 <button id="barToggle" aria-label="Bedienung einblenden"></button>
 <div id="railTip" class="glass"></div>
 
@@ -352,6 +375,10 @@
     <svg viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
     <span id="camLbl">Kamera starten</span>
   </button>
+  <button id="focusBtn" class="mi" role="menuitem" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/><circle cx="12" cy="12" r="2.5"/></svg>
+    <span id="focusLbl">Fokus fixieren</span>
+  </button>
   <button id="resetBtn" class="mi" role="menuitem">
     <svg viewBox="0 0 24 24"><path d="M5 12a7 7 0 1 0 2.1-5"/><path d="M5 5v4h4"/></svg>
     <span>Foto zurücksetzen</span>
@@ -378,6 +405,12 @@
 <div id="modePanel" class="pop glass" role="group" aria-label="Einstellungen">
   <div class="pAlign">
     <button id="pPersp" class="pt" aria-pressed="false"><span>Perspektive</span><i></i></button>
+    <div class="psep"></div>
+    <button id="mkOn" class="pt" aria-pressed="false"><span>Marker</span><i></i></button>
+    <button id="mkLearn" class="pt act" aria-pressed="false"><span>Farbe anlernen</span><b id="mkSwatch" class="mk-sw"></b></button>
+    <div class="prow"><span class="pl">Empfindlichkeit</span>
+      <button id="mkMinus" class="pb" aria-label="Weniger empfindlich">−</button><span id="mkTol" style="min-width:24px;text-align:center;color:#fff">5</span><button id="mkPlus" class="pb" aria-label="Empfindlicher">+</button>
+    </div>
   </div>
   <div class="pLines">
     <button id="gGrid" class="pt" aria-pressed="false"><span>Raster</span><i></i></button>
@@ -425,7 +458,7 @@
 <script>
 'use strict';
 /* ================= Version und Einstellungen ================= */
-const APP_VERSION = '0.7';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
+const APP_VERSION = '0.8';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
 const SETTINGS_FORMAT = 1;          // Format des Einstellungsobjekts; nur abwärtskompatibel ändern
 const STORAGE_KEY = 'zeichenhilfe.settings';
 
@@ -439,7 +472,9 @@ const settings = {
   photo: { opacity: 0.5, x: 0, y: 0, scale: 1, rotation: 0, corners: [[0,0],[0,0],[0,0],[0,0]] },
   // Ansicht: cx/cy = Papierpunkt (Anteil 0..1) in der Bildschirmmitte, scale = Zoom 1..5
   view:  { cx: 0.5, cy: 0.5, scale: 1 },
-  ui:    { barVisible: true, mode: 'align', locked: false, orientFixed: false, perspOn: false, panelCollapsed: false },  // locked wird NICHT gespeichert
+  ui:    { barVisible: true, mode: 'align', locked: false, orientFixed: false, perspOn: false, panelCollapsed: false, focusFixed: false },
+  // Marker: angelernte Farbe (HSV, h 0..360, s/v 0..1) und Empfindlichkeit 1..10
+  marker: { on: false, color: null, tol: 5 },  // locked wird NICHT gespeichert
   // Hilfslinien im Foto-Koordinatensystem. Einheit: kurze Fotoseite = 1, Ursprung = Fotomitte.
   guides: {
     grid:    { on: false, n: 4, color: 'black', bold: false },
@@ -474,7 +509,8 @@ function saveSettings(){
     formatVersion: SETTINGS_FORMAT, appVersion: APP_VERSION,
     photo: { opacity: p.opacity, x: p.x, y: p.y, scale: p.scale, rotation: p.rotation, corners: p.corners.map(c => [c[0], c[1]]) },
     view:  { cx: v.cx, cy: v.cy, scale: v.scale },
-    ui:    { barVisible: u.barVisible, mode: u.mode, orientFixed: u.orientFixed, perspOn: u.perspOn, panelCollapsed: u.panelCollapsed },
+    ui:    { barVisible: u.barVisible, mode: u.mode, orientFixed: u.orientFixed, perspOn: u.perspOn, panelCollapsed: u.panelCollapsed, focusFixed: u.focusFixed },
+    marker: { on: settings.marker.on, color: settings.marker.color ? Object.assign({}, settings.marker.color) : null, tol: settings.marker.tol },
     guides: JSON.parse(JSON.stringify(settings.guides))
   });
 }
@@ -503,6 +539,13 @@ function mergeSettings(raw){
   if (typeof gg.color === 'string') S.guides.grid.color = GRID_COLORS[gg.color] ? gg.color : 'black';   // alte Farben Rot/Blau -> Schwarz
   if (typeof u.perspOn === 'boolean') S.ui.perspOn = u.perspOn;
   if (typeof u.panelCollapsed === 'boolean') S.ui.panelCollapsed = u.panelCollapsed;
+  if (typeof u.focusFixed === 'boolean') S.ui.focusFixed = u.focusFixed;
+  const mk = obj(raw.marker);
+  if (typeof mk.on === 'boolean') S.marker.on = mk.on;
+  S.marker.tol = Math.round(num(mk.tol, 1, 10, S.marker.tol));
+  const mc = mk.color;
+  if (mc && typeof mc === 'object' && [mc.h, mc.s, mc.v].every(n => typeof n === 'number' && isFinite(n)))
+    S.marker.color = { h: ((mc.h % 360) + 360) % 360, s: Math.min(1, Math.max(0, mc.s)), v: Math.min(1, Math.max(0, mc.v)) };
   if (Array.isArray(p.corners) && p.corners.length === 4 &&
       p.corners.every(c => Array.isArray(c) && c.length === 2 && c.every(n => typeof n === 'number' && isFinite(n) && Math.abs(n) <= 10)))
     S.photo.corners = p.corners.map(c => [c[0], c[1]]);
@@ -905,6 +948,7 @@ function cornerHandlePos(S){
 const f2 = v => Math.round(v * 100) / 100;
 function updateGuides(){
   if (!P.w) return;
+  if (typeof markerDraw === 'function') markerDraw();
   const G = settings.guides, g = computeGeom();
   // Raster: Endpunkte abbilden, Linien gerade verbinden (bleiben unter Perspektive gerade)
   gridLine.style.display = G.grid.on ? '' : 'none';
@@ -1006,6 +1050,12 @@ function applyLinesPanel(){
   const tog = (el, on) => { el.classList.toggle('on', on); el.setAttribute('aria-pressed', on); };
   tog($('gGrid'), G.grid.on); tog($('gBold'), G.grid.bold); tog($('gHor'), G.horizon.on);
   tog($('pPersp'), settings.ui.perspOn);
+  tog($('mkOn'), settings.marker.on);
+  $('mkLearn').classList.toggle('on', learnMode);
+  $('mkTol').textContent = settings.marker.tol;
+  $('mkMinus').disabled = settings.marker.tol <= 1; $('mkPlus').disabled = settings.marker.tol >= 10;
+  const mcol = settings.marker.color;
+  $('mkSwatch').style.background = mcol ? hsvCss(mcol) : 'transparent';
   $('pPerspReset').disabled = isRect(settings.photo.corners);
   $('gN').textContent = G.grid.n;
   $('gMinus').disabled = G.grid.n <= GRID_N_MIN; $('gPlus').disabled = G.grid.n >= GRID_N_MAX;
@@ -1157,6 +1207,7 @@ function resetView(){
 }
 
 stage.addEventListener('pointerdown', e => {
+  if (learnMode){ learnMode = false; learnAt(stagePoint(e)); return; }   // Marker-Farbe anlernen
   if (gesturesBlocked()) return;
   try { stage.setPointerCapture(e.pointerId); } catch(err){}
   pointers.set(e.pointerId, stagePoint(e));
@@ -1228,6 +1279,7 @@ function setMode(m){
   settings.ui.mode = m;
   pointers.clear(); endGesture(); lastTap = null; clearTimeout(singleTapTimer);
   panelOpen = false;                     // Einstellungsfeld beim Moduswechsel schließen
+  if (learnMode){ learnMode = false; hideToast(); }
   applyUi();
   scheduleSave();
 }
@@ -1301,6 +1353,7 @@ function stopCamera(){
   $('camLbl').textContent = 'Kamera starten';
   releaseWakeLock();
   layout(); updateHint();
+  if (typeof mkUpdateLoop === 'function'){ mkUpdateLoop(); applyFocusUi(); }
 }
 
 async function startCamera(opts){
@@ -1351,6 +1404,10 @@ async function startCamera(opts){
   try { await cam.play(); } catch(e){ /* autoplay ist muted; Fehler hier ignorieren */ }
   updateHint(); scheduleLayout();
   requestWakeLock();
+  readFocus();
+  if (settings.ui.focusFixed) applyFocus(true);   // gespeicherten Wunsch still anwenden
+  applyFocusUi();
+  mkUpdateLoop();
 }
 camBtn.addEventListener('click', () => startCamera());
 
@@ -1480,6 +1537,7 @@ function closePops(){ closePop(opPop); closePop(moreMenu); }
 function togglePop(pop, btn){
   const open = !pop.classList.contains('show');
   closePops();
+  if (open && panelOpen){ panelOpen = false; applyLinesPanel(); updateGuides(); }   // nur ein Feld gleichzeitig
   if (open){
     pop.classList.add('show'); btn.classList.add('on'); placePop(pop, btn);
     if (pop === opPop) armOpTimer();
@@ -1539,7 +1597,11 @@ async function renderInfo(){
     ['Drehung gesperrt', !orientSupported ? '<span class="nein">nicht unterstützt</span>' : (orientLocked ? 'ja' : 'nein')],
     ['Läuft als installierte App', yn(isInstalledApp())],
     ['Offline-Speicher (Service Worker)', swActive() ? '<span class="ja">aktiv</span>' : '<span class="nein">nicht aktiv</span>'],
-    ['Bildschirm', esc(innerWidth + ' × ' + innerHeight + ' (Pixeldichte ' + (window.devicePixelRatio || 1) + ')')]
+    ['Bildschirm', esc(innerWidth + ' × ' + innerHeight + ' (Pixeldichte ' + (window.devicePixelRatio || 1) + ')')],
+    ['Fokus-Modi', esc(stream ? (focusInfo.modes.length ? focusInfo.modes.join(', ') : 'keine Angabe') : '– (Kamera aus)')],
+    ['Fokus aktuell', esc((focusInfo.current || '–') + (settings.ui.focusFixed ? ' (fixiert gewünscht)' : ''))],
+    ['Fokus-Entfernung', esc(typeof focusInfo.dist === 'number' ? focusInfo.dist.toFixed(3) : '–')],
+    ['Marker-Erkennung', esc(mkRunning ? (mkState.fps.toFixed(1).replace('.', ',') + ' /s · ' + mkState.ms.toFixed(1).replace('.', ',') + ' ms pro Bild · ' + mkState.blobs + ' Flecken vor Filter') : 'aus')]
   ];
   infoBody.innerHTML = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
   // Daten
@@ -1587,6 +1649,7 @@ $('confirmYes').addEventListener('click', async () => {
 
 /* ================= Kurzer Hinweis (Toast) ================= */
 let toastTimer = null;
+function hideToast(){ clearTimeout(toastTimer); $('toast').classList.remove('show'); }
 function showToast(text, ms){
   const t = $('toast');
   t.textContent = text; t.classList.add('show');
@@ -1695,6 +1758,314 @@ if ('serviceWorker' in navigator){
   });
 }
 
+/* ================= Fokus fixieren ================= */
+const focusBtn = $('focusBtn');
+let focusInfo = { modes: [], current: null, dist: null, caps: {} };
+function camTrack(){ return stream ? stream.getVideoTracks()[0] : null; }
+function readFocus(){
+  const tr = camTrack();
+  focusInfo = { modes: [], current: null, dist: null, caps: {} };
+  if (!tr) return focusInfo;
+  try {
+    const caps = tr.getCapabilities ? tr.getCapabilities() : {};
+    const st = tr.getSettings ? tr.getSettings() : {};
+    focusInfo.caps = caps || {};
+    focusInfo.modes = Array.isArray(caps && caps.focusMode) ? caps.focusMode.slice() : [];
+    focusInfo.current = st.focusMode || null;
+    focusInfo.dist = (typeof st.focusDistance === 'number') ? st.focusDistance : null;
+  } catch(e){}
+  return focusInfo;
+}
+const focusSupported = () => focusInfo.modes.includes('manual') || focusInfo.modes.includes('single-shot');
+// Fixieren: manual + aktuelle Entfernung, sonst single-shot. Frei: continuous.
+async function applyFocus(fixed){
+  const tr = camTrack();
+  if (!tr) return 'nocam';
+  readFocus();
+  const m = focusInfo.modes;
+  try {
+    if (fixed){
+      if (m.includes('manual') && focusInfo.caps.focusDistance && typeof focusInfo.dist === 'number')
+        await tr.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: focusInfo.dist }] });
+      else if (m.includes('single-shot'))
+        await tr.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] });
+      else if (m.includes('manual'))
+        await tr.applyConstraints({ advanced: [{ focusMode: 'manual' }] });
+      else return 'unsupported';
+    } else if (m.includes('continuous')){
+      await tr.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+    }
+    readFocus();
+    return 'ok';
+  } catch(e){ readFocus(); return 'error'; }
+}
+function applyFocusUi(){
+  const on = settings.ui.focusFixed;
+  focusBtn.classList.toggle('on', on);
+  focusBtn.setAttribute('aria-pressed', on);
+  $('focusLbl').textContent = on ? 'Fokus frei' : 'Fokus fixieren';
+  focusBtn.disabled = !!(stream && !on && !focusSupported());   // Kamera läuft, Gerät kann es nicht: ausgegraut
+}
+focusBtn.addEventListener('click', async () => {
+  const want = !settings.ui.focusFixed;
+  if (!stream){
+    settings.ui.focusFixed = want;
+    showToast(want ? 'Fokus wird beim Kamerastart fixiert' : 'Fokus frei');
+  } else {
+    const r = await applyFocus(want);
+    if (want && r !== 'ok'){ showMsg('Fokus lässt sich auf diesem Gerät nicht fixieren.', false); settings.ui.focusFixed = false; }
+    else { settings.ui.focusFixed = want; showToast(want ? 'Fokus fixiert' : 'Fokus frei'); }
+  }
+  applyFocusUi(); scheduleSave();
+});
+
+/* ================= Marker (Stufe 1: erkennen und anzeigen, Foto folgt noch nicht) ================= */
+const MK_W = 320;                        // Breite des verkleinerten Bildes für die Erkennung
+const mkCanvas = document.createElement('canvas');
+let mkCtx = null;
+const markerG = $('markerG'), mRings = [...markerG.querySelectorAll('circle')], mNums = [...markerG.querySelectorAll('text')];
+const markerChip = $('markerChip');
+// found: Marker in Video-Pixeln {x, y, r, label}
+const mkState = { found: [], blobs: 0, fps: 0, ms: 0, prev: null };
+let mkRunning = false, mkLast = 0, mkCount = 0, mkCountT = 0, mkMsAvg = 0;
+let learnMode = false;
+
+function hsvCss(c){
+  // HSV -> CSS-Farbe für den kleinen Farbpunkt
+  const h = c.h, s = c.s, v = c.v, f = n => { const k = (n + h / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
+  return `rgb(${Math.round(f(5) * 255)},${Math.round(f(3) * 255)},${Math.round(f(1) * 255)})`;
+}
+function rgbToHsv(r, g, b){
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d){
+    if (max === r) h = ((g - b) / d) % 6; else if (max === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  return { h, s: max ? d / max : 0, v: max / 255 };
+}
+// Grenzen aus angelernter Farbe und Empfindlichkeit (1 = streng, 10 = großzügig)
+function mkThresholds(){
+  const c = settings.marker.color, t = settings.marker.tol;
+  return { h: c.h, hTol: 6 + 3 * t,
+           sMin: Math.max(0.15, c.s - (0.12 + 0.04 * t)),
+           vMin: Math.max(0.12, c.v - (0.15 + 0.05 * t)) };
+}
+// Ein Kamerabild auswerten
+function mkProcess(){
+  const vw = cam.videoWidth, vh = cam.videoHeight;
+  if (!vw || !vh || !settings.marker.color) return;
+  const w = MK_W, h = Math.max(1, Math.round(MK_W * vh / vw)), n = w * h;
+  if (mkCanvas.width !== w || mkCanvas.height !== h || !mkCtx){
+    mkCanvas.width = w; mkCanvas.height = h;
+    mkCtx = mkCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  const t0 = performance.now();
+  mkCtx.drawImage(cam, 0, 0, w, h);
+  const data = mkCtx.getImageData(0, 0, w, h).data;
+  const T = mkThresholds(), vMin = T.vMin * 255;
+  // 1) Farbmaske
+  const mask = new Uint8Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4){
+    const r = data[p], g = data[p + 1], b = data[p + 2];
+    const max = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    if (max < vMin) continue;
+    const min = r < g ? (r < b ? r : b) : (g < b ? g : b), d = max - min;
+    if (d === 0 || d < T.sMin * max) continue;
+    let hh = max === r ? (g - b) / d : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    hh *= 60; if (hh < 0) hh += 360;
+    let dh = hh > T.h ? hh - T.h : T.h - hh; if (dh > 180) dh = 360 - dh;
+    if (dh <= T.hTol) mask[i] = 1;
+  }
+  // 2) zusammenhängende Flecken (4er-Nachbarschaft)
+  const lab = new Uint8Array(n), stack = new Int32Array(n), blobs = [];
+  for (let i = 0; i < n; i++){
+    if (!mask[i] || lab[i]) continue;
+    let sp = 0, area = 0, sx = 0, sy = 0, minx = w, maxx = 0, miny = h, maxy = 0;
+    stack[sp++] = i; lab[i] = 1;
+    while (sp){
+      const j = stack[--sp], x = j % w, y = (j / w) | 0;
+      area++; sx += x; sy += y;
+      if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+      if (x > 0     && mask[j - 1] && !lab[j - 1]){ lab[j - 1] = 1; stack[sp++] = j - 1; }
+      if (x < w - 1 && mask[j + 1] && !lab[j + 1]){ lab[j + 1] = 1; stack[sp++] = j + 1; }
+      if (y > 0     && mask[j - w] && !lab[j - w]){ lab[j - w] = 1; stack[sp++] = j - w; }
+      if (y < h - 1 && mask[j + w] && !lab[j + w]){ lab[j + w] = 1; stack[sp++] = j + w; }
+    }
+    blobs.push({ area, cx: sx / area + 0.5, cy: sy / area + 0.5, bw: maxx - minx + 1, bh: maxy - miny + 1 });
+  }
+  // 3) nach Größe und Rundheit filtern
+  const minA = 8, maxA = n * 0.02;
+  const cand = blobs.filter(o => {
+    if (o.area < minA || o.area > maxA) return false;
+    const asp = Math.max(o.bw, o.bh) / Math.min(o.bw, o.bh), fill = o.area / (o.bw * o.bh);
+    return asp <= 2.5 && fill >= 0.45;
+  }).sort((a, b) => b.area - a.area).slice(0, 4);
+  // in Video-Pixel umrechnen
+  const k = vw / w;
+  const pts = cand.map(o => ({ x: o.cx * k, y: o.cy * k, r: Math.sqrt(o.area / Math.PI) * k }));
+  mkState.found = orderMarkers(pts);
+  mkState.blobs = blobs.length;
+  // Messwerte
+  const now = performance.now(), ms = now - t0;
+  mkMsAvg = mkMsAvg ? mkMsAvg * 0.8 + ms * 0.2 : ms;
+  mkState.ms = mkMsAvg;
+  mkCount++;
+  if (!mkCountT) mkCountT = now;
+  if (now - mkCountT >= 1000){ mkState.fps = mkCount * 1000 / (now - mkCountT); mkCount = 0; mkCountT = now; }
+  markerDraw();
+}
+// Feste Reihenfolge: 1 oben links, 2 oben rechts, 3 unten rechts, 4 unten links
+function orderMarkers(pts){
+  if (!pts.length) return [];
+  if (pts.length < 4 && mkState.prev){
+    // Teilweise verdeckt: Nummer des nächstgelegenen Markers aus der letzten vollständigen Erkennung übernehmen
+    const used = new Set(), out = [];
+    const pairs = [];
+    pts.forEach((p, i) => mkState.prev.forEach(q => pairs.push({ i, label: q.label, d: Math.hypot(p.x - q.x, p.y - q.y) })));
+    pairs.sort((a, b) => a.d - b.d);
+    const taken = new Set();
+    for (const pr of pairs){
+      if (taken.has(pr.i) || used.has(pr.label)) continue;
+      taken.add(pr.i); used.add(pr.label); out.push(Object.assign({}, pts[pr.i], { label: pr.label }));
+    }
+    return out.sort((a, b) => a.label - b.label);
+  }
+  if (pts.length === 3){
+    // Ein Punkt fehlt und es gibt keine Vorgeschichte: fehlende Ecke als Parallelogramm-Ergänzung
+    // gegenüber dem Punkt mit dem größten Innenwinkel schätzen, dann wie bei 4 Punkten nummerieren.
+    let best = 0, bestAng = -1;
+    for (let i = 0; i < 3; i++){
+      const a = pts[(i + 1) % 3], b = pts[i], c = pts[(i + 2) % 3];
+      const ang = Math.abs(Math.atan2((a.x - b.x) * (c.y - b.y) - (a.y - b.y) * (c.x - b.x), (a.x - b.x) * (c.x - b.x) + (a.y - b.y) * (c.y - b.y)));
+      if (ang > bestAng){ bestAng = ang; best = i; }
+    }
+    const B = pts[best], A = pts[(best + 1) % 3], C = pts[(best + 2) % 3];
+    const virt = { x: A.x + C.x - B.x, y: A.y + C.y - B.y, r: 0, virtual: true };
+    const full = orderFour(pts.concat([virt]));
+    return full.filter(p => !p.virtual);
+  }
+  return orderFour(pts, true);
+}
+function orderFour(pts, remember){
+  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length, cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+  const byAngle = pts.slice().sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+  let start = 0;   // im Uhrzeigersinn, Start beim Punkt mit kleinstem x+y (oben links)
+  byAngle.forEach((p, i) => { if (p.x + p.y < byAngle[start].x + byAngle[start].y) start = i; });
+  const out = byAngle.map((p, i) => Object.assign({}, byAngle[(i + start) % byAngle.length], { label: i + 1 }));
+  if (remember && out.length === 4) mkState.prev = out.map(p => ({ x: p.x, y: p.y, label: p.label }));
+  return out;
+}
+// Ringe über dem Kamerabild (Video-Pixel -> Papier -> Bildschirm, inkl. Ansicht-Zoom)
+function markerDraw(){
+  const show = mkRunning && cam.videoWidth;
+  markerG.style.display = show ? '' : 'none';
+  applyMarkerChip();
+  if (!show) return;
+  const vw = cam.videoWidth, f = P.w / vw;
+  for (let i = 0; i < 4; i++){
+    const m = mkState.found[i];
+    mRings[i].style.display = mNums[i].style.display = m ? '' : 'none';
+    if (!m) continue;
+    const x = V.tx + V.s * (P.left + m.x * f), y = V.ty + V.s * (P.top + m.y * f);
+    const r = Math.max(9, m.r * f * V.s * 1.5 + 4);
+    mRings[i].setAttribute('cx', x); mRings[i].setAttribute('cy', y); mRings[i].setAttribute('r', r);
+    mNums[i].setAttribute('x', x + r * 0.75 + 2); mNums[i].setAttribute('y', y - r * 0.75 - 2);
+    mNums[i].textContent = m.label;
+  }
+}
+function applyMarkerChip(){
+  const on = settings.marker.on;
+  markerChip.classList.toggle('show', on);
+  if (!on) return;
+  markerChip.textContent = !settings.marker.color ? 'Marker: Farbe anlernen'
+                         : !stream ? 'Marker: Kamera aus'
+                         : mkState.found.length + '/4 Marker';
+}
+// Erkennung nur, wenn Marker an, Farbe angelernt, Kamera läuft und App sichtbar (Akku)
+function mkWanted(){ return settings.marker.on && !!settings.marker.color && !!stream && !document.hidden; }
+function mkUpdateLoop(){
+  if (mkWanted()){
+    if (!mkRunning){ mkRunning = true; mkCount = 0; mkCountT = 0; mkState.fps = 0; mkSchedule(); }
+  } else {
+    mkRunning = false; mkState.found = []; mkState.prev = null;
+  }
+  markerDraw();
+}
+function mkSchedule(){
+  if (!mkRunning) return;
+  if (cam.requestVideoFrameCallback) cam.requestVideoFrameCallback(mkTick);
+  else requestAnimationFrame(mkTick);
+}
+function mkTick(){
+  if (!mkRunning) return;
+  const now = performance.now();
+  // Abstand: mind. 40 ms (≤ 25/s) und mind. das 2,5-Fache der Rechenzeit, damit die App flüssig bleibt
+  if (now - mkLast >= Math.max(40, mkMsAvg * 2.5)){
+    mkLast = now;
+    try { mkProcess(); } catch(e){ /* ein fehlerhaftes Bild überspringen */ }
+  }
+  mkSchedule();
+}
+document.addEventListener('visibilitychange', () => mkUpdateLoop());
+
+// Farbe anlernen: kleiner Bereich (Radius ≈ 10 Bildschirm-px) um den Finger, Median in HSV.
+// Nur die kräftigsten Pixel zählen (Sättigung ≥ 60 % der stärksten), damit Papier um einen kleinen Punkt nicht stört.
+function learnAt(pt){
+  hideMsg(); hideToast();
+  applyLinesPanel();
+  if (!stream || !cam.videoWidth){ showMsg('Kamera zuerst starten (⋯ → Kamera starten).', false); return; }
+  const vw = cam.videoWidth, vh = cam.videoHeight;
+  const px = (pt.x - V.tx) / V.s - P.left, py = (pt.y - V.ty) / V.s - P.top;
+  if (px < 0 || py < 0 || px > P.w || py > P.h){ showMsg('Bitte direkt auf einen Punkt im Kamerabild tippen.', false); return; }
+  const vx = px / P.w * vw, vy = py / P.h * vh;
+  const rad = Math.max(2, Math.round(10 / V.s * vw / P.w));
+  const x0 = Math.max(0, Math.round(vx - rad)), y0 = Math.max(0, Math.round(vy - rad));
+  const sw = Math.min(vw - x0, 2 * rad + 1), sh = Math.min(vh - y0, 2 * rad + 1);
+  try {
+    const c = document.createElement('canvas'); c.width = sw; c.height = sh;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(cam, x0, y0, sw, sh, 0, 0, sw, sh);
+    const d = ctx.getImageData(0, 0, sw, sh).data, px0 = [];
+    for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++){
+      if (Math.hypot(x + x0 - vx, y + y0 - vy) > rad) continue;
+      const p = (y * sw + x) * 4; px0.push(rgbToHsv(d[p], d[p + 1], d[p + 2]));
+    }
+    if (!px0.length) return;
+    const sMax = Math.max(...px0.map(o => o.s));
+    const sel = px0.filter(o => o.s >= sMax * 0.6);
+    const hs = [], ss = [], vs = [];
+    let sx = 0, sy = 0;
+    for (const o of sel){
+      hs.push(o.h); ss.push(o.s); vs.push(o.v);
+      sx += Math.cos(o.h * Math.PI / 180) * o.s; sy += Math.sin(o.h * Math.PI / 180) * o.s;
+    }
+    const mean = Math.atan2(sy, sx) * 180 / Math.PI;
+    const med = a => { const b = a.slice().sort((p, q) => p - q); return b[b.length >> 1]; };
+    // Farbton um den (kreisförmigen) Mittelwert ausrollen, dann Median
+    let h = med(hs.map(v => { let dv = v - mean; while (dv > 180) dv -= 360; while (dv < -180) dv += 360; return mean + dv; }));
+    h = ((h % 360) + 360) % 360;
+    const col = { h: Math.round(h * 10) / 10, s: Math.round(med(ss) * 1000) / 1000, v: Math.round(med(vs) * 1000) / 1000 };
+    if (col.s < 0.15) showMsg('Diese Stelle hat kaum Farbe. Für Marker eine kräftige Farbe nehmen (z. B. Grün oder Pink).', false);
+    settings.marker.color = col;
+    mkState.prev = null;
+    showToast(settings.marker.on ? 'Farbe angelernt' : 'Farbe angelernt – jetzt „Marker“ einschalten');
+    applyLinesPanel(); mkUpdateLoop(); scheduleSave();
+  } catch(e){ showMsg('Farbe konnte nicht gemessen werden.', false); }
+}
+$('mkOn').addEventListener('click', () => { settings.marker.on = !settings.marker.on; applyLinesPanel(); mkUpdateLoop(); scheduleSave(); });
+$('mkMinus').addEventListener('click', () => { settings.marker.tol = Math.max(1, settings.marker.tol - 1); applyLinesPanel(); scheduleSave(); });
+$('mkPlus').addEventListener('click', () => { settings.marker.tol = Math.min(10, settings.marker.tol + 1); applyLinesPanel(); scheduleSave(); });
+$('mkLearn').addEventListener('click', () => {
+  if (learnMode){ learnMode = false; hideToast(); applyLinesPanel(); return; }
+  if (!stream){ showMsg('Kamera zuerst starten (⋯ → Kamera starten).', false); return; }
+  learnMode = true;
+  panelOpen = false;                      // Feld schließen, damit die Punkte frei sichtbar sind
+  applyLinesPanel();
+  // Hinweis als durchlässiger Toast, damit er keinen Punkt verdeckt
+  showToast('Tippe auf einen deiner Punkte im Kamerabild', 20000);
+});
+
 /* ================= Start ================= */
 // Versionen vergleichen ("0.10" > "0.9")
 function cmpVersion(a, b){
@@ -1720,6 +2091,7 @@ settings.ui.locked = false;              // immer entsperrt starten
 // 2) Oberfläche mit (wiederhergestellten) Werten aufbauen
 applyGridStyle();
 applyOrientUi();
+applyFocusUi();
 applyInstallUi();
 setOpacity(settings.photo.opacity * 100);
 applyBar();

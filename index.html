@@ -2,7 +2,7 @@
 <!--
   Zeichenhilfe – Overlay und Perspektive
   Autor: Benjamin Dormoros
-  Version: siehe APP_VERSION im Skript (aktuell 0.11)
+  Version: siehe APP_VERSION im Skript (aktuell 0.12)
 
   Änderungsverlauf
   ----------------
@@ -98,6 +98,22 @@
                     ImageBitmap wird bei fast gleicher Zeit bevorzugt (statt Worker). Diagnose: Marker-Werte
                     oben, laufend aktualisiert (1×/s), Schalter "Suchfenster zeigen" (nicht gespeichert).
                     Kamera startet nach Rückkehr aus dem Hintergrund von selbst neu (wenn erlaubt).
+  0.12 (2026-11-02) Marker-Tracking robuster und schneller (Stufe 3). Wiederfinden: länger als 0,5 s weniger als
+                    3 Punkte stimmig -> Vollsuche jedes Bild, 4 Flecken werden über die FORM geprüft (konvexes
+                    Viereck, Reihenfolge im Uhrzeigersinn, Homographie zur Referenz ohne Spiegelung/Entartung,
+                    Punktgrößen passend zur Perspektive), auch weit weg von der letzten Lage; Bestätigung durch
+                    3 Bilder hintereinander, dann Größen/Fenster/Zähler neu und Foto sofort an die neue Lage.
+                    Größenfilter je Ecke aus der Perspektive (Punkte weiter hinten kleiner). Ovale Punkte erlaubt
+                    (Momente: Seitenverhältnis bis ca. 4,5, Ellipsen-Füllgrad). Schon 1 Rasterpunkt zählt
+                    (Punkte ab ca. 5 px Ø bei 1080 px). Größe je Punkt darf sich von Bild zu Bild nur langsam
+                    ändern (gegen Punkte, die mit einem Gegenstand verschmelzen). Schneller folgen: Vorhersage je
+                    Punkt aus geglätteter Lage + Geschwindigkeit, Fenster wachsen mit der Geschwindigkeit, Glättung
+                    neu abgestimmt (Geschwindigkeit schneller geschätzt, Zittern als Totzone), Erkennung öfter
+                    (Abstand 1,2× statt 2× der Rechenzeit), bei Fenstersuche werden nur die Fenster gelesen.
+                    Stufe 3: bei 3 stimmigen Punkten wird der 4. geschätzt (Papier bewegt sich in seiner Ebene,
+                    Punkte-Viereck laut "Punkte-Format") und das Foto folgt weiter ("Verankert · 3/4"); passt das
+                    Modell nicht oder sind es 2 oder weniger Punkte, hält es. Ein Punkt, der nach längerem Fehlen
+                    wieder auftaucht, hat 15 Bilder Probezeit (muss dort liegen, wo ihn die 3 anderen erwarten).
 
   VERSIONSNUMMER: wird NUR hier in APP_VERSION gepflegt. sw.js erhält sie über die Adresse
   (./sw.js?v=APP_VERSION) und benennt damit seinen Cache. Zusätzliche Dateien neben index.html:
@@ -507,7 +523,7 @@
 <script>
 'use strict';
 /* ================= Version und Einstellungen ================= */
-const APP_VERSION = '0.11';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
+const APP_VERSION = '0.12';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
 const SETTINGS_FORMAT = 1;          // Format des Einstellungsobjekts; nur abwärtskompatibel ändern
 const STORAGE_KEY = 'zeichenhilfe.settings';
 
@@ -1672,9 +1688,10 @@ function renderDiag(){
     ['Verworfen (Fehltreffer)', esc(mkStat.outliers + ' einzelne Punkte · ' + mkStat.rejected + ' ganze Bilder')],
     ['Vollsuche', esc(mkRunning ? fmt1(mkState.msFull) + ' ms · ' + mkState.blobs + ' Flecken vor Filter' : '–')],
     ['Fenstersuche', esc(mkRunning ? fmt1(mkState.msWin) + ' ms · Anteil ' + Math.round(mkState.winShare * 100) + ' %' : '–')],
-    ['Verankert', esc(settings.marker.anchor.on ? 'ja · ' + mkState.found.length + '/4' : 'nein')],
+    ['Verankert', esc(settings.marker.anchor.on ? 'ja · ' + mkState.found.filter(f => !f.virtual).length + '/4' + (mkState.found.some(f => f.virtual) ? ' (1 geschätzt)' : '') : 'nein')],
     ['Toleranz / Zittern (verankert)', esc(settings.marker.anchor.on && mkRunning ? fmt1(mkTolNow) + ' px / ' + fmt1(mkNoise) + ' px' : '–')],
-    ['Neu gesetzt (Absicherung)', esc(mkStat.reseeds + '×')],
+    ['Wiedergefunden (Vollsuche)', esc(mkStat.reseeds + '×')],
+    ['Mit 3 Punkten weitergeführt', esc(mkStat.virt + ' Bilder')],
     ['Punktgröße (Ø bei 1080 px Breite)', esc(mkRunning && mkDotD ? fmt1(mkDotD) + ' px' + (mkSmall ? ' (klein)' : '') : '–')],
     ['Punkte-Format', esc((MK_FORMATS[settings.marker.format] || MK_FORMATS['a-hoch'])[0])],
     ['Version', esc(APP_VERSION)],
@@ -2025,12 +2042,11 @@ function mkAnalyze(d32, W, H, lut, req, bufs){
     for (let y = y0; y < y1; y++){
       for (let x = x0, i = y * W + x0; x < x1; x++, i++){
         if (!mask[i] || lab[i]) continue;
-        let sp = 0, area = 0, sx = 0, sy = 0, minx = W, maxx = 0, miny = H, maxy = 0;
+        let sp = 0, area = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
         stack[sp++] = i; lab[i] = 1;
         while (sp){
           const j = stack[--sp], xx = j % W, yy = (j / W) | 0;
-          area++; sx += xx; sy += yy;
-          if (xx < minx) minx = xx; if (xx > maxx) maxx = xx; if (yy < miny) miny = yy; if (yy > maxy) maxy = yy;
+          area++; sx += xx; sy += yy; sxx += xx * xx; syy += yy * yy; sxy += xx * yy;
           if (xx > 0     && mask[j - 1] && !lab[j - 1]){ lab[j - 1] = 1; stack[sp++] = j - 1; }
           if (xx < W - 1 && mask[j + 1] && !lab[j + 1]){ lab[j + 1] = 1; stack[sp++] = j + 1; }
           if (yy > 0     && mask[j - W] && !lab[j - W]){ lab[j - W] = 1; stack[sp++] = j - W; }
@@ -2038,8 +2054,15 @@ function mkAnalyze(d32, W, H, lut, req, bufs){
         }
         count++;
         if (area < minA || area > maxA) continue;
-        const bw = maxx - minx + 1, bh = maxy - miny + 1;
-        if (Math.max(bw, bh) / Math.min(bw, bh) > 2.5 || area / (bw * bh) < 0.45) continue;
+        if (area >= 6){
+          // Form über Momente (0.12): ovale Punkte (schräge Sicht) erlaubt, Striche/Ringe/Haufen nicht
+          const mx = sx / area, my = sy / area;
+          const cxx = sxx / area - mx * mx + 1 / 12, cyy = syy / area - my * my + 1 / 12, cxy = sxy / area - mx * my;
+          const tr = (cxx + cyy) / 2, dd = Math.sqrt(Math.max(0, (cxx - cyy) * (cxx - cyy) / 4 + cxy * cxy));
+          const l1 = tr + dd, l2 = Math.max(1e-6, tr - dd);
+          if (l1 / l2 > 20) continue;                                        // Seitenverhältnis > ca. 4,5
+          if (area / (4 * Math.PI * Math.sqrt(l1 * l2)) < 0.55) continue;     // keine gefüllte Ellipse
+        }
         cands.push({ x: (sx / area + 0.5) / W, y: (sy / area + 0.5) / H, r: Math.sqrt(area / Math.PI) / W, area });
       }
     }
@@ -2064,6 +2087,7 @@ const PERF_KEY = 'zeichenhilfe.mkperf';
 const mkBufs = {};
 const mkCv = document.createElement('canvas');
 let mkCx = null;
+let mkFull32 = null;      // Pixelpuffer für die Fenstersuche (nur Fenster werden gefüllt)
 let mkWay = null, mkBusy = false, mkWorker = null, mkWorkerTrack = null, mkLow = null, mkGen = 0;
 let mkLastRes = 0;
 const maskCv = $('maskCv');
@@ -2190,7 +2214,7 @@ function mkSchedule(){
 async function mkTick(){
   if (!mkRunning || !mkWay) return;
   const now = performance.now();
-  if (!mkBusy && now - mkLast >= Math.max(25, mkMsAvg * 2)){
+  if (!mkBusy && now - mkLast >= Math.max(20, mkMsAvg * 1.2)){
     mkBusy = true; mkLast = now;
     const gen = mkGen, way = mkWay;
     try {
@@ -2200,15 +2224,35 @@ async function mkTick(){
         if (mkCv.width !== W || mkCv.height !== H || !mkCx){ mkCv.width = W; mkCv.height = H; mkCx = mkCv.getContext('2d', { willReadFrequently: true }); }
         mkBuildLut();
         const req = mkReq();
+        // 0.12: Bei Fenstersuche nur die Fenster zeichnen und lesen (Lesen war am Handy der teuerste Teil)
+        let boxes = null;
+        if (req.rects && !req.wantMask){
+          boxes = req.rects.map(r => [Math.max(0, Math.floor(r[0] * W)), Math.max(0, Math.floor(r[1] * H)), Math.min(W, Math.ceil(r[2] * W)), Math.min(H, Math.ceil(r[3] * H))])
+                           .filter(b => b[2] > b[0] && b[3] > b[1]);
+          if (boxes.reduce((s, b) => s + (b[2] - b[0]) * (b[3] - b[1]), 0) > 0.5 * W * H) boxes = null;
+        }
         const t0 = performance.now();
         if (way.grab === 'bitmap'){
           const bmp = await createImageBitmap(el, { resizeWidth: W, resizeHeight: H, resizeQuality: 'low' });
-          mkCx.drawImage(bmp, 0, 0); bmp.close();
+          if (boxes) for (const b of boxes) mkCx.drawImage(bmp, b[0], b[1], b[2] - b[0], b[3] - b[1], b[0], b[1], b[2] - b[0], b[3] - b[1]);
+          else mkCx.drawImage(bmp, 0, 0);
+          bmp.close();
+        } else if (boxes){
+          const fx = ew / W, fy = eh / H;
+          for (const b of boxes) mkCx.drawImage(el, b[0] * fx, b[1] * fy, (b[2] - b[0]) * fx, (b[3] - b[1]) * fy, b[0], b[1], b[2] - b[0], b[3] - b[1]);
         } else mkCx.drawImage(el, 0, 0, W, H);
         const t1 = performance.now();
-        const img = mkCx.getImageData(0, 0, W, H);
+        let d32;
+        if (boxes){
+          if (!mkFull32 || mkFull32.length !== W * H) mkFull32 = new Uint32Array(W * H);
+          for (const b of boxes){
+            const bw = b[2] - b[0], bh = b[3] - b[1], id = new Uint32Array(mkCx.getImageData(b[0], b[1], bw, bh).data.buffer);
+            for (let j = 0; j < bh; j++) mkFull32.set(id.subarray(j * bw, j * bw + bw), (b[1] + j) * W + b[0]);
+          }
+          d32 = mkFull32;
+        } else d32 = new Uint32Array(mkCx.getImageData(0, 0, W, H).data.buffer);
         const t2 = performance.now();
-        const res = mkAnalyze(new Uint32Array(img.data.buffer), W, H, mkLut, req, mkBufs);
+        const res = mkAnalyze(d32, W, H, mkLut, req, mkBufs);
         const t3 = performance.now();
         if (gen === mkGen) mkHandleResult(res, { a: t1 - t0, b: t2 - t1, c: t3 - t2, full: !req.rects, W, H, aspectOk: Math.abs(ew / eh - cam.videoWidth / cam.videoHeight) < 0.02 });
       }
@@ -2297,25 +2341,29 @@ function mkMeasureFinish(){
 /* ---------- Suchauftrag für das nächste Bild ---------- */
 let mkTracks = [], mkLastFull = 0, mkLost = 0, mkPending = null;
 let mkWinCount = 0, mkFullCount = 0;
-const mkStat = { rejected: 0, outliers: 0, reseeds: 0 };
+const mkStat = { rejected: 0, outliers: 0, reseeds: 0, virt: 0, probe: 0 };
+let mkRealRun = {}, mkProbDev = {};   // je Nummer: Bilder in Folge echt gesehen / Abweichungen in der Probezeit
+let mkAbsent = {}, mkProb = {};       // je Nummer: Bilder in Folge gefehlt / bestandene Bilder in der Probezeit
 const mkDbg = { wins: null, cands: [], found: [] };     // für "Suchfenster zeigen" (Video-Pixel)
 let anchorOkT = 0;          // Zeitpunkt des letzten stimmigen 4/4 im verankerten Zustand
 let anchor3T = 0;           // Zeitpunkt, zu dem zuletzt mindestens 3 Punkte stimmig waren
-// Absicherung nur, wenn länger als 1 s weniger als 3 Punkte stimmig sind. Ist nur EIN Punkt verdeckt (3 stimmig),
-// hält das Foto wie bisher – sonst könnte ein Gegenstand neben dem verdeckten Punkt als neuer Punkt übernommen werden.
-function mkStuck(now){ return anchorOkT && now - anchorOkT > 1000 && now - anchor3T > 1000; }
+// Wiederfinden (0.12), wenn länger als 0,5 s weniger als 3 Punkte stimmig sind. Bei 3 stimmigen Punkten führt
+// Stufe 3 weiter (4. Punkt geschätzt) – ein Gegenstand neben einem verdeckten Punkt wird so nicht übernommen.
+function mkStuck(now){ return anchorOkT && now - anchorOkT > 500 && now - anchor3T > 500; }
 function mkReq(){
   const vw = cam.videoWidth || 1, vh = cam.videoHeight || 1, now = performance.now();
   // Mindestfläche 2 Rasterpunkte (seit 0.11, vorher 8): ein Punkt mit 8 px Ø bei 1080 px Breite ist im
   // 320er-Raster nur ca. 2,4 Rasterpunkte breit (Fläche oft nur 2–4) und fiel vorher immer wieder heraus.
-  const base = { minA: 2, wantMask: showMask };
+  // 0.12: 1 Rasterpunkt genügt (Punkte mit ca. 5–6 px Ø bei 1080 px Breite); Fehltreffer prüfen Größe, Form,
+  // Auswahl der 4 größten Flecken und (verankert) die Stimmigkeit
   const A = settings.marker.anchor;
+  const base = { minA: 1, wantMask: showMask };
   let wins = null;
   if (A.on && A.ref){
-    // verankert: nur in Fenstern um die vorhergesagten Lagen suchen. Absicherung: länger als 1 s kein
-    // stimmiges 4/4 -> alle 300 ms eine Vollsuche (damit Punktgrößen und Fenster neu gesetzt werden können)
-    if (mkStuck(now) && now - mkLastFull > 300) wins = null;
-    else wins = mkAnchorPred().map(p => ({ x: p.x, y: p.y, half: Math.min(0.3 * Math.max(vw, vh), p.half * (1 + 0.25 * Math.min(mkLost, 30))) }));
+    // verankert: nur in Fenstern um die vorhergesagten Lagen suchen. Wiederfinden: länger als 0,5 s weniger als
+    // 3 Punkte stimmig -> jedes Bild Vollsuche (Form-Prüfung in mkReacquire)
+    if (mkStuck(now)) wins = null;
+    else wins = mkAnchorPred().map(p => ({ x: p.x, y: p.y, half: p.half }));
   } else {
     const full = !mkTracks.length || (mkTracks.length < 4 && now - mkLastFull > 300) || now - mkLastFull > 1000;
     if (!full) wins = mkTracks.map(t => ({ x: t.x + t.vx, y: t.y + t.vy, half: Math.max(4 * t.r, 40 * vw / 1280) + 1.5 * Math.hypot(t.vx, t.vy) }));
@@ -2329,6 +2377,7 @@ let mkSm = {};      // Glättung je Nummer (One-Euro-Filter)
 let mkDotD = 0, mkSmall = false, dbgWin = false;
 function mkHandleResult(res, t){
   if (!mkRunning) return;
+  { const n = performance.now(); if (mkLastResT){ const d = Math.min(0.5, (n - mkLastResT) / 1000); mkDtAvg = mkDtAvg ? mkDtAvg * 0.9 + d * 0.1 : d; } mkLastResT = n; }
   const vw = cam.videoWidth, vh = cam.videoHeight;
   if (!vw) return;
   const k = vw / 1280;
@@ -2340,8 +2389,8 @@ function mkHandleResult(res, t){
     if (t.full) mkLastFull = performance.now();
     found = mkAssign(cands, mkAnchorPred(), true);
     found = mkPlausible(found);
-    if (found.length < 4 && t.full && mkStuck(performance.now())){
-      const rs = mkReseed(cands);
+    if (t.full && mkStuck(performance.now()) && found.filter(f => !f.virtual).length < 3){
+      const rs = mkReacquire(cands);
       if (rs) found = mkAccept(rs);
     }
   } else if (t.full){
@@ -2357,7 +2406,8 @@ function mkHandleResult(res, t){
   if (!(A.on && A.ref) || found.length) mkTracks = found.map(f => { const o = old.get(f.label);
     return { label: f.label, x: f.x, y: f.y, r: f.r, vx: o ? f.x - o.x : 0, vy: o ? f.y - o.y : 0 }; });
   // Glätten
-  mkState.found = found.map(f => Object.assign(mkSmooth(f, k), { r: f.r, label: f.label }));
+  mkState.found = found.map(f => Object.assign(mkSmooth(f, k), { r: f.r, label: f.label, virtual: !!f.virtual }));
+  if (A.on && A.ref && found.some(f => f.virtual)) mkStat.virt++;
   for (const l of Object.keys(mkSm)) if (!found.some(f => f.label === +l)) mkSm[l].miss = (mkSm[l].miss || 0) + 1;
   mkLost = found.length === 4 ? 0 : mkLost + 1;
   // Messwerte
@@ -2379,8 +2429,8 @@ function mkHandleResult(res, t){
   }
   mkLastRes = now;
   // Punktgröße für den Hinweis "Punkte größer malen" (Durchmesser umgerechnet auf 1080 px Breite)
-  if (found.length){
-    const rr = found.map(f => f.r).sort((p, q) => p - q), d = 2 * rr[rr.length >> 1] * 1080 / vw;
+  if (found.some(f => !f.virtual)){
+    const rr = found.filter(f => !f.virtual).map(f => f.r).sort((p, q) => p - q), d = 2 * rr[rr.length >> 1] * 1080 / vw;
     mkDotD = mkDotD ? mkDotD * 0.9 + d * 0.1 : d;
     const small = mkSmall ? mkDotD < 11 : mkDotD < 10;
     if (small !== mkSmall){ mkSmall = small; $('mkHint').classList.toggle('show', small); }
@@ -2394,15 +2444,18 @@ function mkHandleResult(res, t){
 // Kandidaten den erwarteten Lagen (je Nummer) zuordnen: im Fenster, passende Größe, nächstgelegen
 function mkAssign(cands, preds, anchored){
   const out = [];
-  const A = settings.marker.anchor, vw = cam.videoWidth;
-  const sizeRatio = anchored ? mkScaleRatio() : 1;
+  const gp = (cam.videoWidth || 1280) / 320;            // ein Rasterpunkt in Video-Pixeln
   for (const p of preds){
-    let rExp = p.r;
-    if (anchored && A.r && A.r[p.label - 1]) rExp = A.r[p.label - 1] * vw * sizeRatio;
+    // 0.12: erwartete Größe kommt je Ecke aus der Vorhersage (verankert: über die Perspektive)
+    const rExp = p.r;
+    let lo = rExp ? 0.45 * rExp : 0, hi = rExp ? Math.max(2.2 * rExp, 1.5 * gp) : Infinity;
+    // Größe ändert sich von Bild zu Bild nur langsam: ein plötzlich viel größerer/kleinerer Fleck ist eher
+    // ein Punkt, der mit einem Gegenstand verschmolzen ist (Rasterungenauigkeit bei kleinen Punkten eingerechnet)
+    if (p.rl){ lo = Math.max(lo, Math.min(0.7 * p.rl, p.rl - 0.75 * gp)); hi = Math.min(hi, Math.max(1.4 * p.rl, p.rl + 0.75 * gp)); }
     let best = null, bd = Infinity;
     for (const c of cands){
       if (Math.abs(c.x - p.x) > p.half || Math.abs(c.y - p.y) > p.half) continue;   // außerhalb des Fensters: ignorieren
-      if (rExp && (c.r < 0.5 * rExp || c.r > 2 * rExp)) continue;                      // Größe passt nicht
+      if (c.r < lo || c.r > hi) continue;                                            // Größe passt nicht
       const d = Math.hypot(c.x - p.x, c.y - p.y);
       if (d < bd){ bd = d; best = c; }
     }
@@ -2416,25 +2469,46 @@ let anchorLast = null;     // geglättete Markerlage (normiert) der gezeigten Fo
 let anchorAcc = null;      // zuletzt angenommene ungeglättete Lagen (Video-Pixel) je Nummer
 let anchorPrevAcc = null;
 let anchorH = null;        // Homographie Referenz -> zuletzt angenommene Lage (normiert)
+let anchorHpx = null;      // Homographie Referenz -> zuletzt angenommene UNGEGLÄTTETE Lage (Video-Pixel)
+let anchorLast4 = null;    // letzte 4 echt gesehenen ungeglätteten Lagen (für Stufe 3)
+let mkRLast = {};          // zuletzt gemessene Größe je Nummer (geglättet) – gegen verschmolzene Flecken
+function refPx(){ const A = settings.marker.anchor, vw = cam.videoWidth || 1, vh = cam.videoHeight || 1; return A.ref.map(p => [p[0] * vw, p[1] * vh]); }
+// normierte Homographie -> Video-Pixel (S·H·S⁻¹)
+function n2px(H){ const vw = cam.videoWidth || 1, vh = cam.videoHeight || 1, s = [vw, vh, 1]; return H.map((v, i) => v * s[(i / 3) | 0] / s[i % 3]); }
+function px2n(H){ const vw = cam.videoWidth || 1, vh = cam.videoHeight || 1, s = [vw, vh, 1]; return H.map((v, i) => v * s[i % 3] / s[(i / 3) | 0]); }
+// örtlicher Größenfaktor einer Homographie am Punkt (x, y): sqrt(|det J|) = sqrt(|det H / w³|)
+function hScale(H, x, y){
+  const w = H[6] * x + H[7] * y + H[8];
+  const det = H[0] * (H[4] * H[8] - H[5] * H[7]) - H[1] * (H[3] * H[8] - H[5] * H[6]) + H[2] * (H[3] * H[7] - H[4] * H[6]);
+  const v = Math.sqrt(Math.abs(det / (w * w * w)));
+  return isFinite(v) && v > 0 ? v : 1;
+}
+function mkHpx(){ return anchorHpx || n2px(anchorH || ID3); }
+// Vorhersage je Nummer: geglättete Lage + geglättete Geschwindigkeit dieses Punktes (aus dem One-Euro-Filter,
+// unempfindlich gegen einzelne Fehltreffer, je Ecke verschieden, z. B. beim Kippen). Fehlt beides: Homographie der
+// gezeigten Lage. Erwartete Größe aus der Perspektive an dieser Ecke; das Fenster wächst mit der Geschwindigkeit.
+let mkDtAvg = 0, mkLastResT = 0;
 function mkAnchorPred(){
-  const A = settings.marker.anchor, vw = cam.videoWidth || 1, vh = cam.videoHeight || 1;
-  const H = anchorH || ID3, ratio = mkScaleRatio();
+  const A = settings.marker.anchor, vw = cam.videoWidth || 1, k = vw / 1280;
+  const R = refPx(), H = mkHpx(), Hs = n2px(anchorH || ID3), dt = Math.min(0.2, mkDtAvg || 0.033);
   return [1, 2, 3, 4].map(l => {
-    const q = m3apply(H, A.ref[l - 1][0], A.ref[l - 1][1]) || { x: A.ref[l - 1][0], y: A.ref[l - 1][1] };
-    let x = q.x * vw, y = q.y * vh;
-    if (anchorAcc && anchorPrevAcc && anchorAcc[l] && anchorPrevAcc[l]){ x += anchorAcc[l].x - anchorPrevAcc[l].x; y += anchorAcc[l].y - anchorPrevAcc[l].y; }
-    const r = A.r && A.r[l - 1] ? A.r[l - 1] * vw * ratio : 12 * vw / 1280;
-    return { label: l, x, y, r, half: Math.max(4 * r, 40 * vw / 1280) };
+    const sm = mkSm[l];
+    let x, y, vx = 0, vy = 0;
+    if (sm && !(sm.miss > 15)){ x = sm.x; y = sm.y; vx = sm.dx * k * dt; vy = sm.dy * k * dt; }
+    else { const q = m3apply(Hs, R[l - 1][0], R[l - 1][1]) || { x: R[l - 1][0], y: R[l - 1][1] }; x = q.x; y = q.y; }
+    const v = Math.hypot(vx, vy);
+    const r = A.r && A.r[l - 1] ? A.r[l - 1] * vw * hScale(H, R[l - 1][0], R[l - 1][1]) : 12 * k;
+    // nach Verlust wächst das Fenster (Suche UND Zuordnung, vorher wuchs nur die Suche)
+    const half = Math.min(0.3 * Math.max(vw, cam.videoHeight || vw), (Math.max(4 * r, 40 * k) + 2 * v) * (1 + 0.25 * Math.min(mkLost, 30)));
+    return { label: l, x: x + vx, y: y + vy, r, rl: mkRLast[l] || 0, half };
   });
 }
-// Größenverhältnis aktuell / beim Merken der Punktgrößen (über den Umfang des Marker-Vierecks)
 function quadPerim(pts){ let s = 0; for (let i = 0; i < 4; i++) s += Math.hypot(pts[(i + 1) % 4][0] - pts[i][0], pts[(i + 1) % 4][1] - pts[i][1]); return s; }
-function mkScaleRatio(){
-  const A = settings.marker.anchor, vw = cam.videoWidth || 1, vh = cam.videoHeight || 1;
-  if (!A.rPerim || !A.ref) return 1;
-  const H = anchorH || ID3;
-  const pts = A.ref.map(p => { const q = m3apply(H, p[0], p[1]) || { x: p[0], y: p[1] }; return [q.x * vw / vw, q.y * vh / vw]; });
-  return quadPerim(pts) / A.rPerim;
+// Punktgrößen auf die Referenz-Geometrie umrechnen (r_ref = r_jetzt / Größenfaktor an dieser Ecke)
+function mkSetRefSizes(pts, H){
+  const A = settings.marker.anchor, vw = cam.videoWidth || 1, vh = cam.videoHeight || 1, R = refPx();
+  A.r = pts.map((p, i) => Math.max(1e-4, p.r / hScale(H, R[i][0], R[i][1]) / vw));
+  A.rPerim = quadPerim(A.ref.map(p => [p[0], p[1] * vh / vw]));      // nur noch für ältere Versionen gespeichert
 }
 // Affine Abbildung aus 3 Punktpaaren
 function affine3(src, dst){
@@ -2504,7 +2578,8 @@ function mkPlausible(found){
   if (pres.length === 4 && inl){ const r = Math.min(fitBest, 0.03 * size); mkNoise = mkNoise ? mkNoise * 0.9 + r * 0.1 : r; }
   const consistent = new Set();
   if (inl && fitBest <= tol){
-    for (const p of pres){ const q = inl.f(p.L[0], p.L[1]); if (Math.hypot(q[0] - p.C[0], q[1] - p.C[1]) <= tol) consistent.add(p.f.label); }
+    // ein zuletzt nur geschätzter Punkt (Stufe 3) darf beim Wiederauftauchen etwas weiter abweichen
+    for (const p of pres){ const q = inl.f(p.L[0], p.L[1]); if (Math.hypot(q[0] - p.C[0], q[1] - p.C[1]) <= (anchorAcc[p.f.label].v ? 2 : 1) * tol) consistent.add(p.f.label); }
   }
   if (!(pres.length === 4 && consistent.size < 3)){
     for (let l = 1; l <= 4; l++){
@@ -2512,25 +2587,43 @@ function mkPlausible(found){
       mkSeen[l] = consistent.has(l) ? Math.min(6, s0 + 1) : found.some(f => f.label === l) ? Math.max(0, s0 - 2) : Math.max(0, s0 - 1);
     }
   }
+  // Probezeit (0.12): Ein Punkt, der nach längerem Fehlen (≥ 5 Bilder, z. B. verdeckt) wieder auftaucht, muss
+  // 15 Bilder lang dort liegen, wo ihn die 3 anderen über die letzte stabile 4er-Lage erwarten. Sonst könnte ein
+  // Gegenstand, der neben einem verdeckten Punkt auftaucht und langsam wegwandert, den Punkt "mitziehen" (von Bild zu
+  // Bild wäre jeder Schritt klein genug). Lässt sich das nicht prüfen (keine 3 sicheren anderen Punkte), zählt er noch
+  // nicht. Bleibt die Abweichung über 20 Bilder gleich (echter Punkt, Modell nur ungenau), wird er trotzdem übernommen.
+  for (let l = 1; l <= 4; l++){
+    const f = found.find(o => o.label === l);
+    if (!f || !consistent.has(l)){ mkAbsent[l] = (mkAbsent[l] || 0) + 1; if (mkAbsent[l] >= 5 && mkProb[l] === undefined) mkProb[l] = 0; continue; }
+    mkAbsent[l] = 0;
+    if (mkProb[l] === undefined) continue;
+    const others = found.filter(o => o.label !== l && consistent.has(o.label) && mkProb[o.label] === undefined);
+    const est = others.length >= 3 ? mkEstimate(l, others.slice(0, 3)) : null;
+    if (!est){ consistent.delete(l); continue; }
+    const dev = Math.hypot(f.x - est.x, f.y - est.y), dv = mkProbDev[l] = (mkProbDev[l] || []).concat([dev]).slice(-20);
+    if (dev > 0.5 * tol && !(dv.length >= 20 && Math.max(...dv) - Math.min(...dv) <= 0.25 * tol)){ consistent.delete(l); mkStat.probe++; continue; }
+    if (++mkProb[l] >= 15){ delete mkProb[l]; delete mkProbDev[l]; }
+  }
   const usable = found.filter(f => consistent.has(f.label) && mkSeen[f.label] >= 3);
   if (usable.length >= 3) anchor3T = performance.now();
   if (pres.length === 4 && consistent.size === 3) mkStat.outliers++;
   if (pres.length === 4 && consistent.size < 3){
-    // keine stimmige Dreiergruppe: schnelle echte Bewegung oder Fehltreffer
-    const C = found.map(f => [f.x, f.y]);
-    const prevOk = mkRejectPrev && (simFit(mkRejectPrev, C) || { res: Infinity }).res <= tol * 2;
-    mkRejectRun = prevOk ? mkRejectRun + 1 : 1;
-    mkRejectPrev = C;
-    if (mkRejectRun >= 4 && quadValid(C)){
-      mkRejectRun = 0; mkRejectPrev = null;
-      for (const f of found){ delete mkSm[f.label]; mkSeen[f.label] = 3; }
-      return mkAccept(found);
-    }
+    // keine stimmige Dreiergruppe: Fehltreffer oder sehr schnelle echte Änderung. Seit 0.12 wird hier nichts mehr
+    // "nach 4 Bildern" übernommen (das konnte einen Gegenstand neben einem verdeckten Punkt übernehmen); echte große
+    // Änderungen fängt das Wiederfinden nach 0,5 s mit Form- und Größenprüfung auf.
     mkStat.rejected++;
     return [];
   }
   mkRejectRun = 0; mkRejectPrev = null;
-  if (usable.length < 4) return usable;              // weniger als 4 stimmige Punkte: Foto hält
+  if (usable.length < 3) return usable;              // 2 oder weniger stimmige Punkte: Foto hält
+  if (usable.length === 3){                          // Stufe 3: 4. Punkt aus der letzten gültigen Lage schätzen
+    // nur 3 Punkte = keine Gegenprobe mehr: strengere Toleranz, sonst halten
+    const sf3 = simFit(usable.map(f => [anchorAcc[f.label].x, anchorAcc[f.label].y]), usable.map(f => [f.x, f.y]));
+    if (!sf3 || sf3.res > 0.35 * tol) return usable;
+    const v = mkVirtual(usable);
+    if (!v) return usable;
+    usable.push(v); usable.sort((a, b) => a.label - b.label);
+  }
   // Sprung- und Formprüfung gegen die letzte angenommene Lage
   const C = usable.map(f => [f.x, f.y]);
   const maxD = Math.max(...usable.map((f, i) => Math.hypot(f.x - last[i].x, f.y - last[i].y)));
@@ -2541,7 +2634,7 @@ function mkPlausible(found){
     if (mkPending && usable.every((f, i) => Math.hypot(f.x - mkPending[i].x, f.y - mkPending[i].y) < 4 * k + 0.02 * size)){
       mkPending = null;
       for (const f of usable) delete mkSm[f.label];
-      return mkAccept(usable);
+      return mkAccept(usable);   // (Stufe 3 eingeschlossen)
     }
     mkPending = usable.map(f => ({ x: f.x, y: f.y }));
     mkStat.rejected++;
@@ -2552,45 +2645,106 @@ function mkPlausible(found){
 }
 function mkAccept(found){
   const A = settings.marker.anchor, vw = cam.videoWidth;
-  if (found.length === 4 && (!A.r || !A.rPerim)){       // ältere Daten ohne gemerkte Punktgrößen
-    A.r = found.map(f => f.r / vw);
-    A.rPerim = quadPerim(found.map(f => [f.x / vw, f.y / vw]));
-  }
   const acc = {};
-  for (const f of found) acc[f.label] = { x: f.x, y: f.y };
+  for (let l = 1; l <= 4; l++){ const f = found.find(o => o.label === l); mkRealRun[l] = f && !f.virtual ? (mkRealRun[l] || 0) + 1 : 0; }
+  for (const f of found){ acc[f.label] = { x: f.x, y: f.y, v: !!f.virtual }; if (!f.virtual) mkRLast[f.label] = mkRLast[f.label] ? 0.7 * mkRLast[f.label] + 0.3 * f.r : f.r; }
   anchorPrevAcc = anchorAcc; anchorAcc = acc;
-  if (found.length === 4) anchorOkT = anchor3T = performance.now();
+  if (found.length === 4){
+    anchorOkT = anchor3T = performance.now();
+    const H = solveHomography(refPx(), found.map(f => [f.x, f.y]));
+    if (H) anchorHpx = H;
+    if (!A.r) mkSetRefSizes(found, anchorHpx || ID3);          // ältere Daten ohne gemerkte Punktgrößen
+    if (!found.some(f => f.virtual) && found.every(f => (mkRealRun[f.label] || 0) >= 14 && mkProb[f.label] === undefined)){
+      anchorLast4 = {}; for (const f of found) anchorLast4[f.label] = { x: f.x, y: f.y, r: f.r };
+      // gemerkte Punktgrößen langsam nachführen (Licht, Schärfe, Entfernung ändern sich)
+      if (A.r && anchorHpx){ const R = refPx(); A.r = A.r.map((r, i) => 0.9 * r + 0.1 * found[i].r / hScale(anchorHpx, R[i][0], R[i][1]) / vw); }
+    }
+  }
   return found;
 }
-// Absicherung (0.11): Vollsuche findet 4 passende Punkte in der Nähe der letzten Lage -> Punktgrößen,
-// Größenbezug, Vorhersage und Zähler neu setzen (statt dauerhaft zu halten). Die Referenz bleibt.
-function mkReseed(cands){
-  const A = settings.marker.anchor, vw = cam.videoWidth, vh = cam.videoHeight;
-  if (cands.length < 4 || !A.ref) return null;
-  const pred = mkAnchorPred();
-  const ref = [1, 2, 3, 4].map(l => anchorAcc && anchorAcc[l] ? anchorAcc[l] : pred[l - 1]);
-  const size = quadPerim(ref.map(p => [p.x, p.y])) / 4;
-  const used = new Set(), pick = [];
-  for (let i = 0; i < 4; i++){
-    let best = null, bd = 0.25 * size;
-    for (const c of cands){ if (used.has(c)) continue; const d = Math.hypot(c.x - ref[i].x, c.y - ref[i].y); if (d < bd){ bd = d; best = c; } }
-    if (!best) return null;
-    used.add(best); pick.push(Object.assign({}, best, { label: i + 1 }));
+// Stufe 3 (0.12): fehlender Punkt aus der letzten gültigen Perspektive. Modell: Das Handy steht still, das Papier
+// bewegt sich in seiner Ebene. Die 3 sichtbaren Punkte werden über die letzte echte 4er-Lage auf das Papier
+// zurückgerechnet (Punkte-Viereck als Rechteck laut "Punkte-Format"), dort wird eine Ähnlichkeitsabbildung
+// (Verschieben/Drehen/Skalieren) angepasst und der 4. Punkt damit wieder ins Bild gerechnet. Ist er gerade erst
+// verschwunden, ist die Abbildung fast die Identität -> kein Sprung.
+function mkVirtual(three){
+  const miss = [1, 2, 3, 4].find(l => !three.some(f => f.label === l));
+  const q = miss ? mkEstimate(miss, three) : null;
+  return q ? { x: q.x, y: q.y, r: anchorLast4[miss].r, label: miss, virtual: true } : null;
+}
+// Lage eines Punktes aus 3 anderen schätzen (Papier-Modell, Bezug = letzte stabile echte 4er-Lage)
+function mkEstimate(miss, three){
+  if (!anchorLast4 || [1, 2, 3, 4].some(l => !anchorLast4[l])) return null;
+  const L4 = [1, 2, 3, 4].map(l => [anchorLast4[l].x, anchorLast4[l].y]);
+  const vw = cam.videoWidth || 1, vh = cam.videoHeight || 1;
+  const Wp = mkPaperAspect(L4.map(p => [p[0] / vw, p[1] / vh]));
+  const rect = [[0, 0], [Wp, 0], [Wp, 1], [0, 1]];
+  const M = solveHomography(rect, L4), Mi = M && m3inv(M);       // Papier (Punkte-Rechteck) -> Bild der letzten 4er-Lage
+  if (!Mi) return null;
+  const U = three.map(f => m3apply(Mi, f.x, f.y));
+  if (U.some(u => !u)) return null;
+  const sf = simFit(three.map(f => rect[f.label - 1]), U.map(u => [u.x, u.y]));
+  if (!sf) return null;
+  // passt das Modell nicht (z. B. Handy wird gekippt statt Papier verschoben), lieber halten als falsch schätzen
+  const back = three.map((f, i) => { const p = sf.f(rect[f.label - 1][0], rect[f.label - 1][1]), q = m3apply(M, p[0], p[1]); return q ? Math.hypot(q.x - f.x, q.y - f.y) : Infinity; });
+  if (Math.max(...back) > 0.5 * mkTolNow) return null;
+  const v = sf.f(rect[miss - 1][0], rect[miss - 1][1]), q = m3apply(M, v[0], v[1]);
+  if (!q || !isFinite(q.x) || !isFinite(q.y)) return null;
+  return q;
+}
+// Wiederfinden (0.12): aus den Flecken der Vollsuche 4 auswählen, die über die FORM passen – auch weit weg von
+// der letzten Lage. Prüfungen: konvexes Viereck im Uhrzeigersinn; Homographie Referenz -> Viereck ohne Spiegelung
+// und ohne starke Entartung (Größenfaktor der Ecken höchstens 4× verschieden); Punktgrößen passen zur Perspektive.
+// Unter mehreren Möglichkeiten gewinnt die mit den stimmigsten Größen und der kleinsten Drehung zur letzten Lage.
+// Übernommen wird erst, wenn 3 Bilder hintereinander dieselbe Lage zeigen.
+let mkReacqPrev = null;
+function mkReacquire(cands){
+  const A = settings.marker.anchor, vw = cam.videoWidth || 1, vh = cam.videoHeight || 1, gp = vw / 320;
+  if (!A.ref || cands.length < 4){ mkReacqPrev = null; return null; }
+  const C = cands.slice().sort((a, b) => b.r - a.r).slice(0, 10);
+  const R = refPx(), r0 = [0, 1, 2, 3].map(i => A.r && A.r[i] ? A.r[i] * vw : 1);
+  let lastAng = null;
+  if (anchorAcc && anchorAcc[1] && anchorAcc[2]) lastAng = Math.atan2(anchorAcc[2].y - anchorAcc[1].y, anchorAcc[2].x - anchorAcc[1].x);
+  let best = null;
+  const n = C.length;
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) for (let k = j + 1; k < n; k++) for (let m = k + 1; m < n; m++){
+    const pts = [C[i], C[j], C[k], C[m]], rs = pts.map(p => p.r);
+    if (Math.max(...rs) > 4 * Math.min(...rs)) continue;
+    const ord = orderFour(pts.map(p => Object.assign({}, p)), false);
+    if (!quadValid(ord.map(p => [p.x, p.y]))) continue;
+    if (quadPerim(ord.map(p => [p.x, p.y])) < 0.15 * vw) continue;            // winziges Viereck: eher Fleckenhaufen
+    for (let sh = 0; sh < 4; sh++){
+      const L = [0, 1, 2, 3].map(q => ord[(q + sh) % 4]);
+      const H = solveHomography(R, L.map(p => [p.x, p.y]));
+      if (!H) continue;
+      if (R.some(p => !(H[6] * p[0] + H[7] * p[1] + H[8] > 0))) continue;       // Punkt "hinter" der Abbildung
+      const sc = R.map(p => hScale(H, p[0], p[1]));
+      if (Math.max(...sc) > 4 * Math.min(...sc)) continue;                      // zu stark verzerrt
+      const lr = L.map((p, q) => Math.log(p.r / (r0[q] * sc[q])));
+      const mean = lr.reduce((a, b) => a + b, 0) / 4;
+      const sizeErr = Math.max(...lr.map(v => Math.abs(v - mean)));
+      const allow = Math.log(2.2) + (Math.min(...rs) < 1.5 * gp ? Math.log(1.6) : 0);   // winzige Punkte: Größe ungenau
+      if (sizeErr > allow) continue;
+      let dAng = 0;
+      if (lastAng !== null){ dAng = Math.abs(Math.atan2(L[1].y - L[0].y, L[1].x - L[0].x) - lastAng); if (dAng > Math.PI) dAng = 2 * Math.PI - dAng; }
+      const score = sizeErr + 0.5 * dAng;
+      if (!best || score < best.score) best = { score, L, H };
+    }
   }
-  const rs = pick.map(f => f.r);
-  if (Math.max(...rs) > 2.5 * Math.min(...rs)) return null;          // sehr unterschiedlich groß: eher Fehltreffer
-  if (!quadValid(pick.map(f => [f.x, f.y]))) return null;
-  const cur = pick.map(f => [f.x / vw, f.y / vh]);
-  const H = solveHomography(A.ref, cur);
-  if (!H) return null;
-  anchorH = H;
-  A.r = pick.map(f => f.r / vw);
-  A.rPerim = quadPerim(cur.map(p => [p[0], p[1] * vh / vw]));
+  if (!best){ mkReacqPrev = null; return null; }
+  const size = quadPerim(best.L.map(p => [p.x, p.y])) / 4, tolC = 0.02 * size + 1.5 * gp;
+  const same = mkReacqPrev && best.L.every((p, q) => Math.hypot(p.x - mkReacqPrev.L[q].x, p.y - mkReacqPrev.L[q].y) < tolC);
+  mkReacqPrev = { L: best.L.map(p => ({ x: p.x, y: p.y })), n: same ? mkReacqPrev.n + 1 : 1 };
+  if (mkReacqPrev.n < 3) return null;                  // 3 Bilder hintereinander dieselbe Lage
+  mkReacqPrev = null;
+  // neu setzen: Perspektive, Punktgrößen, Zähler; das Foto folgt sofort (Glättung neu)
+  anchorHpx = best.H; anchorH = px2n(best.H);
+  mkSetRefSizes(best.L, best.H);
   mkSm = {}; mkPending = null; mkRejectRun = 0; mkRejectPrev = null; mkNoise = 0;
   for (let l = 1; l <= 4; l++) mkSeen[l] = 3;
-  anchorAcc = anchorPrevAcc = null;
+  anchorAcc = anchorPrevAcc = null; mkRLast = {}; mkRealRun = { 1: 99, 2: 99, 3: 99, 4: 99 }; mkProbDev = {}; mkAbsent = {}; mkProb = {};
   mkStat.reseeds++;
-  return pick;
+  return best.L.map((p, q) => ({ x: p.x, y: p.y, r: p.r, label: q + 1 }));
 }
 // One-Euro-Filter: im Stillstand stark glätten, bei Bewegung schnell folgen
 function mkSmooth(f, k){
@@ -2601,10 +2755,13 @@ function mkSmooth(f, k){
   const dt = Math.max(1 / 120, Math.min(0.5, now - s.t)); s.t = now;
   const alpha = fc => { const tau = 1 / (2 * Math.PI * fc); return 1 / (1 + tau / dt); };
   const vx = (f.x - s.x) / dt / k, vy = (f.y - s.y) / dt / k;            // Geschwindigkeit in px/s (1280er Maßstab)
-  const ad = alpha(1.0);
+  // 0.12: Geschwindigkeit schneller schätzen (4 Hz statt 1 Hz – vorher kam die Glättung erst nach mehreren
+  // Bildern "in Fahrt"); Zittern im Stillstand als Totzone abziehen, damit das Foto ruhig bleibt.
+  const ad = alpha(4.0);
   s.dx += ad * (vx - s.dx); s.dy += ad * (vy - s.dy);
-  const speed = Math.hypot(s.dx, s.dy);
-  const a = alpha(0.3 + 0.08 * speed);
+  const jit = 2.5 * mkNoise / k / dt;
+  const speed = Math.max(0, Math.hypot(s.dx, s.dy) - Math.max(8, jit));
+  const a = alpha(0.4 + 0.25 * speed);
   s.x += a * (f.x - s.x); s.y += a * (f.y - s.y);
   return { x: s.x, y: s.y };
 }
@@ -2679,14 +2836,25 @@ function anchorRebase(){
   if (!A.on) return;
   const base = anchorLast || markersNorm();
   if (!base) return;
-  A.ref = base.map(c => c.slice());
+  anchorSetRef(base);
   A.quad = photoQuadNorm();
-  anchorLast = base; anchorH = ID3;
+  anchorLast = base;
   scheduleSave();
+}
+// Neue Referenz (Nachjustieren, Neu einpassen): erwartete Punktgrößen auf die neue Referenz umrechnen
+function anchorSetRef(cur){
+  const A = settings.marker.anchor, vw = cam.videoWidth || 1;
+  let rNow = null;
+  if (A.r && A.ref){ const R0 = refPx(), H0 = mkHpx(); rNow = A.r.map((r, i) => ({ r: r * vw * hScale(H0, R0[i][0], R0[i][1]) })); }
+  A.ref = cur.map(c => c.slice());
+  anchorH = ID3;
+  const R = refPx();
+  anchorHpx = anchorAcc && [1, 2, 3, 4].every(l => anchorAcc[l]) ? solveHomography(R, [1, 2, 3, 4].map(l => [anchorAcc[l].x, anchorAcc[l].y])) : null;
+  if (rNow) mkSetRefSizes(rNow, anchorHpx || ID3);
 }
 function applyAnchorBtn(){
   const A = settings.marker.anchor, b = $('mkAnchor');
-  const can = mkRunning && mkState.found.length === 4;
+  const can = mkRunning && mkReal4();
   b.classList.toggle('on', A.on);
   b.setAttribute('aria-pressed', A.on);
   b.classList.toggle('dim', !A.on && !can);
@@ -2729,16 +2897,19 @@ function autoFit(cur){
   if (!setPhotoQuadNorm(Qn)){ Object.assign(p, old); applyPhotoTransform(); return false; }
   return true;
 }
+function mkReal4(){ return mkState.found.filter(f => !f.virtual).length === 4; }
 // Verankerung mit der aktuellen Lage beginnen (Referenz = geglättete Lage, Vergleich = ungeglättete Lage)
 function anchorStart(cur){
-  const A = settings.marker.anchor, vw = cam.videoWidth, vh = cam.videoHeight;
+  const A = settings.marker.anchor;
   A.on = true; A.ref = cur.map(c => c.slice()); A.quad = photoQuadNorm(); anchorLast = cur; anchorH = ID3; mkPending = null;
-  // Größe der 4 Punkte merken (gegen Fehltreffer), bezogen auf die Größe des Marker-Vierecks
-  A.r = [1, 2, 3, 4].map(l => (mkState.found.find(f => f.label === l) || { r: 0 }).r / vw);
-  A.rPerim = quadPerim(cur.map(p => [p[0], p[1] * vh / vw]));
-  const raw = mkTracks.length === 4 ? mkTracks : mkState.found;
-  anchorAcc = {}; anchorPrevAcc = null;
-  for (const f of raw) anchorAcc[f.label] = { x: f.x, y: f.y };
+  const raw = (mkTracks.length === 4 ? mkTracks : mkState.found).slice().sort((a, b) => a.label - b.label);
+  anchorAcc = {}; anchorPrevAcc = null; anchorLast4 = {};
+  mkRLast = {}; mkRealRun = { 1: 99, 2: 99, 3: 99, 4: 99 }; mkProbDev = {}; mkAbsent = {}; mkProb = {};
+  for (const f of raw){ anchorAcc[f.label] = { x: f.x, y: f.y }; anchorLast4[f.label] = { x: f.x, y: f.y, r: f.r }; mkRLast[f.label] = f.r; }
+  anchorHpx = solveHomography(refPx(), raw.map(f => [f.x, f.y])) || ID3;
+  // Größe der 4 Punkte merken (gegen Fehltreffer), umgerechnet auf die Referenz-Geometrie
+  mkSetRefSizes(raw, anchorHpx);
+  mkReacqPrev = null;
   // Fehlerursache 0.10: Zähler standen nach dem Tippen auf 0 -> "0/4 · gehalten", bis 3 stimmige Bilder
   // hintereinander kamen (bei kleinen, zitternden Punkten fast nie). Alle 4 waren gerade sichtbar: sofort gültig.
   for (let l = 1; l <= 4; l++) mkSeen[l] = 3;
@@ -2747,10 +2918,10 @@ function anchorStart(cur){
 $('mkAnchor').addEventListener('click', () => {
   const A = settings.marker.anchor;
   if (A.on){
-    A.on = false; anchorLast = null; anchorAcc = anchorPrevAcc = null; anchorH = null; mkPending = null;
+    A.on = false; anchorLast = null; anchorAcc = anchorPrevAcc = null; anchorH = null; anchorHpx = null; anchorLast4 = null; mkPending = null;
     showToast('Gelöst – Foto bleibt an dieser Stelle');
   } else {
-    const cur = mkRunning ? markersNorm() : null;
+    const cur = mkRunning && mkReal4() ? markersNorm() : null;
     if (!cur){ showToast('Verankern geht nur bei 4/4 Markern'); return; }
     const fitted = autoFit(cur);                // Foto automatisch in das Punkte-Viereck einpassen
     anchorStart(cur);
@@ -2759,11 +2930,11 @@ $('mkAnchor').addEventListener('click', () => {
   applyLinesPanel(); applyMarkerChip(); scheduleSave();
 });
 $('mkRefit').addEventListener('click', () => {
-  const cur = mkRunning ? markersNorm() : null;
+  const cur = mkRunning && mkReal4() ? markersNorm() : null;
   if (!cur){ showToast('Neu einpassen geht nur bei 4/4 Markern'); return; }
   if (!autoFit(cur)){ showToast('Einpassen nicht möglich – Punkte prüfen'); return; }
   const A = settings.marker.anchor;
-  if (A.on){ A.ref = cur.map(c => c.slice()); A.quad = photoQuadNorm(); anchorLast = cur; anchorH = ID3; }
+  if (A.on){ anchorSetRef(cur); A.quad = photoQuadNorm(); anchorLast = cur; }
   showToast('Neu eingepasst');
   applyLinesPanel(); scheduleSave();
 });
@@ -2823,8 +2994,8 @@ function markerDraw(){
   const vw = cam.videoWidth, f = P.w / vw;
   for (let i = 0; i < 4; i++){
     const m = mkState.found.find(f => f.label === i + 1);
-    mRings[i].style.display = mNums[i].style.display = m ? '' : 'none';
-    if (!m) continue;
+    mRings[i].style.display = mNums[i].style.display = m && !m.virtual ? '' : 'none';   // geschätzter Punkt: kein Ring
+    if (!m || m.virtual) continue;
     const x = V.tx + V.s * (P.left + m.x * f), y = V.ty + V.s * (P.top + m.y * f);
     const r = Math.max(9, m.r * f * V.s * 1.5 + 4);
     mRings[i].setAttribute('cx', x); mRings[i].setAttribute('cy', y); mRings[i].setAttribute('r', r);
@@ -2863,7 +3034,7 @@ function applyMarkerChip(){
   markerChip.textContent = !settings.marker.color ? 'Marker: Farbe anlernen'
                          : !stream ? 'Marker: Kamera aus'
                          : settings.marker.anchor.on
-                           ? 'Verankert · ' + mkState.found.length + '/4' + (mkState.found.length < 4 ? ' · gehalten' : '')
+                           ? 'Verankert · ' + mkState.found.filter(f => !f.virtual).length + '/4' + (mkState.found.length < 4 ? ' · gehalten' : '')
                            : mkState.found.length + '/4 Marker';
   applyAnchorBtn();
 }
@@ -2871,7 +3042,8 @@ function applyMarkerChip(){
 function mkWanted(){ return settings.marker.on && !!settings.marker.color && !!stream && !document.hidden; }
 function mkResetTracking(){
   mkState.found = []; mkState.prev = null; mkTracks = []; mkSm = {}; mkLastFull = 0; mkLost = 0; mkPending = null;
-  anchorAcc = anchorPrevAcc = null; anchorH = null; mkSeen = {}; mkRejectRun = 0; mkRejectPrev = null; mkNoise = 0;
+  anchorAcc = anchorPrevAcc = null; anchorH = null; anchorHpx = null; anchorLast4 = null; mkReacqPrev = null; mkRLast = {}; mkRealRun = {}; mkProbDev = {}; mkAbsent = {}; mkProb = {};
+  mkSeen = {}; mkRejectRun = 0; mkRejectPrev = null; mkNoise = 0;
   anchorOkT = anchor3T = performance.now();     // Absicherung greift auch nach Neustart (z. B. Papier inzwischen verschoben)
   mkDotD = 0;
 }

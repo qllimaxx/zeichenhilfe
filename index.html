@@ -2,7 +2,7 @@
 <!--
   Zeichenhilfe – Overlay und Perspektive
   Autor: Benjamin Dormoros
-  Version: siehe APP_VERSION im Skript (aktuell 0.10)
+  Version: siehe APP_VERSION im Skript (aktuell 0.11)
 
   Änderungsverlauf
   ----------------
@@ -85,6 +85,19 @@
                     passen), Form-/Sprungprüfung mit Bestätigung durch das nächste Bild, One-Euro-Glättung.
                     "Farbmaske zeigen" (nicht gespeichert). Farbprüfung lichtunabhängiger (Helligkeit nur
                     noch ≥ 25 % der angelernten, Mindest-Farbigkeit). Fokus-Code unverändert.
+  0.11 (2026-11-02) Fehler "Verankert · 0/4 · gehalten" direkt nach dem Verankern behoben: Punkte gelten nach
+                    dem Tippen sofort als gesehen, Vergleichslage = ungeglättete Lage, Toleranz berücksichtigt
+                    jetzt das Messraster (1 Rasterpunkt = Kamerabreite/320) und das gemessene Zittern der
+                    Punkte, ein einzelnes unstimmiges oder fehlendes Bild setzt einen Punkt nicht mehr ganz
+                    zurück, ganze verworfene Bilder ändern die Zähler nicht. Kleinere Punkte zulässig
+                    (Mindestfläche 2 statt 8 Rasterpunkte). Absicherung: länger als 1 s kein stimmiges 4/4 ->
+                    Vollsuche alle 300 ms, bei 4 passenden Punkten Punktgrößen/Fenster neu setzen.
+                    "Verankern" passt das Foto automatisch in das Punkte-Viereck ein (Homographie aus
+                    "Punkte-Format": DIN A hoch/quer, Quadrat, Wie im Bild; Foto unverzerrt, so groß wie
+                    möglich, mittig). Knopf "Neu einpassen". Hinweis bei sehr kleinen Punkten.
+                    ImageBitmap wird bei fast gleicher Zeit bevorzugt (statt Worker). Diagnose: Marker-Werte
+                    oben, laufend aktualisiert (1×/s), Schalter "Suchfenster zeigen" (nicht gespeichert).
+                    Kamera startet nach Rückkehr aus dem Hintergrund von selbst neu (wenn erlaubt).
 
   VERSIONSNUMMER: wird NUR hier in APP_VERSION gepflegt. sw.js erhält sie über die Adresse
   (./sw.js?v=APP_VERSION) und benennt damit seinen Cache. Zusätzliche Dateien neben index.html:
@@ -235,7 +248,13 @@
   .mi.on::after{ content:""; width:5px; height:5px; border-radius:50%; background:#fff; }
   .mi.dot::after{ content:""; width:5px; height:5px; border-radius:50%; background:#fff; }
   /* Moduseinstellungen */
-  #modePanel{ width:240px; }
+  #modePanel{ width:240px; max-height:calc(100vh - 16px); overflow-y:auto; overscroll-behavior:contain; }
+  .pt b.pv{ font-weight:400; font-size:13px; color:#fff; }
+  .mkHint{ display:none; padding:0 6px 6px 12px; font-size:10px; line-height:1.3; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mkHint.show{ display:block; }
+  #mkDbgG .dw{ fill:none; stroke:rgba(255,255,255,.75); stroke-width:1px; stroke-dasharray:4 3; }
+  #mkDbgG .dok{ fill:#3c6; stroke:rgba(0,0,0,.6); stroke-width:1px; }
+  #mkDbgG .dbad{ fill:none; stroke:#f55; stroke-width:1.5px; }
   .pb, .sw{ flex:none; }
   .pt{ display:flex; align-items:center; width:100%; min-height:44px; padding:0 12px; border:0; border-radius:10px;
        background:none; color:var(--icon-off); text-align:left; cursor:pointer; }
@@ -342,6 +361,7 @@
       <circle class="handle corner" r="7"/><circle class="handle corner" r="7"/>
       <circle class="handle corner" r="7"/><circle class="handle corner" r="7"/>
     </g>
+    <g id="mkDbgG"></g>
     <g id="markerG">
       <circle class="mring" r="10"/><circle class="mring" r="10"/><circle class="mring" r="10"/><circle class="mring" r="10"/>
       <text class="mnum">1</text><text class="mnum">2</text><text class="mnum">3</text><text class="mnum">4</text>
@@ -430,10 +450,13 @@
     <button id="mkOn" class="pt" aria-pressed="false"><span>Marker</span><i></i></button>
     <button id="mkLearn" class="pt act" aria-pressed="false"><span>Farbe anlernen</span><b id="mkSwatch" class="mk-sw"></b></button>
     <button id="mkAnchor" class="pt" aria-pressed="false"><span id="mkAnchorLbl">Verankern</span><i></i></button>
+    <button id="mkRefit" class="pt act"><span>Neu einpassen</span></button>
+    <button id="mkFmt" class="pt act" aria-label="Punkte-Format wechseln"><span>Punkte-Format</span><b id="mkFmtLbl" class="pv">DIN A hoch</b></button>
     <button id="mkMask" class="pt" aria-pressed="false"><span>Farbmaske zeigen</span><i></i></button>
     <div class="prow"><span class="pl">Empfindlichkeit</span>
       <button id="mkMinus" class="pb" aria-label="Weniger empfindlich">−</button><span id="mkTol" style="min-width:24px;text-align:center;color:#fff">5</span><button id="mkPlus" class="pb" aria-label="Empfindlicher">+</button>
     </div>
+    <div id="mkHint" class="mkHint">Punkte größer malen für stabilere Erkennung</div>
   </div>
   <div class="pLines">
     <button id="gGrid" class="pt" aria-pressed="false"><span>Raster</span><i></i></button>
@@ -474,6 +497,8 @@
     <summary>Diagnose ▸</summary>
     <table><tbody id="infoBody"></tbody></table>
     <button id="perfBtn" class="btn" style="width:100%;margin-top:8px">Erkennung neu messen</button>
+    <button id="dbgWinBtn" class="btn" style="width:100%;margin-top:8px" aria-pressed="false">Suchfenster zeigen: aus</button>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">Gestrichelt = Suchfenster, grün = angenommener Fleck, rot = verworfener Fleck</div>
   </details>
   <button id="installBtn" class="btn">App installieren</button>
   <button id="infoClose" class="btn">Schließen</button>
@@ -482,7 +507,7 @@
 <script>
 'use strict';
 /* ================= Version und Einstellungen ================= */
-const APP_VERSION = '0.10';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
+const APP_VERSION = '0.11';         // EINZIGE Stelle für die Versionsnummer (sw.js bekommt sie per ?v=)
 const SETTINGS_FORMAT = 1;          // Format des Einstellungsobjekts; nur abwärtskompatibel ändern
 const STORAGE_KEY = 'zeichenhilfe.settings';
 
@@ -498,13 +523,16 @@ const settings = {
   view:  { cx: 0.5, cy: 0.5, scale: 1 },
   ui:    { barVisible: true, mode: 'align', locked: false, orientFixed: false, perspOn: false, panelCollapsed: false, focusFixed: false },
   // Marker: angelernte Farbe (HSV, h 0..360, s/v 0..1) und Empfindlichkeit 1..10
-  marker: { on: false, color: null, tol: 5, anchor: { on: false, ref: null, quad: null } },  // locked wird NICHT gespeichert
+  marker: { on: false, color: null, tol: 5, format: 'a-hoch', anchor: { on: false, ref: null, quad: null } },  // locked wird NICHT gespeichert
   // Hilfslinien im Foto-Koordinatensystem. Einheit: kurze Fotoseite = 1, Ursprung = Fotomitte.
   guides: {
     grid:    { on: false, n: 4, color: 'black', bold: false },
     horizon: { on: false, u: 0, v: 0, angle: 0 }   // Punkt auf der Linie (u,v) + Winkel im Foto (Grad)
   }
 };
+// Seitenverhältnis (Breite : Höhe) des Punkte-Vierecks auf dem Papier; null = aus dem Kamerabild schätzen
+const MK_FORMATS = { 'a-hoch': ['DIN A hoch', 1 / Math.SQRT2], 'a-quer': ['DIN A quer', Math.SQRT2], 'quadrat': ['Quadrat', 1], 'bild': ['Wie im Bild', null] };
+const MK_FORMAT_ORDER = ['a-hoch', 'a-quer', 'quadrat', 'bild'];
 const GRID_COLORS = { black: '#000000', white: '#ffffff' };
 const GRID_N_MIN = 2, GRID_N_MAX = 12;
 const HOR_SNAP_DEG = 2;
@@ -535,7 +563,7 @@ function saveSettings(){
     view:  { cx: v.cx, cy: v.cy, scale: v.scale },
     ui:    { barVisible: u.barVisible, mode: u.mode, orientFixed: u.orientFixed, perspOn: u.perspOn, panelCollapsed: u.panelCollapsed, focusFixed: u.focusFixed },
     marker: { on: settings.marker.on, color: settings.marker.color ? Object.assign({}, settings.marker.color) : null, tol: settings.marker.tol,
-              anchor: JSON.parse(JSON.stringify(settings.marker.anchor)) },
+              format: settings.marker.format, anchor: JSON.parse(JSON.stringify(settings.marker.anchor)) },
     guides: JSON.parse(JSON.stringify(settings.guides))
   });
 }
@@ -568,6 +596,7 @@ function mergeSettings(raw){
   const mk = obj(raw.marker);
   if (typeof mk.on === 'boolean') S.marker.on = mk.on;
   S.marker.tol = Math.round(num(mk.tol, 1, 10, S.marker.tol));
+  if (typeof mk.format === 'string' && MK_FORMATS[mk.format]) S.marker.format = mk.format;   // fehlt in älteren Daten: Standard DIN A hoch
   const mc = mk.color;
   if (mc && typeof mc === 'object' && [mc.h, mc.s, mc.v].every(n => typeof n === 'number' && isFinite(n)))
     S.marker.color = { h: ((mc.h % 360) + 360) % 360, s: Math.min(1, Math.max(0, mc.s)), v: Math.min(1, Math.max(0, mc.v)) };
@@ -1453,7 +1482,10 @@ document.addEventListener('visibilitychange', () => {
     if (stream){ camWasRunning = true; stopCamera(); }
   } else {
     if (stream) requestWakeLock();
-    if (camWasRunning) showMsg('Kamera wurde pausiert, während die App im Hintergrund war. Tippe auf „Kamera“.', false);
+    // 0.11: Kamera von selbst wieder starten (Erlaubnis ist schon erteilt); nur wenn das scheitert, Hinweis
+    if (camWasRunning && !stream) startCamera({ silent: true }).then(() => {
+      if (!stream && camWasRunning) showMsg('Kamera wurde pausiert, während die App im Hintergrund war. Tippe auf „Kamera“.', false);
+    });
   }
 });
 window.addEventListener('pagehide', () => { flushSave(); if (stream) stopCamera(); });
@@ -1601,6 +1633,7 @@ window.addEventListener('resize', () => {
 const yn = b => b ? '<span class="ja">ja</span>' : '<span class="nein">nein</span>';
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt1 = v => (Math.round((v || 0) * 10) / 10).toFixed(1).replace('.', ',');
+let infoDevCount = '–';
 async function renderInfo(){
   let devCount = '–';
   try {
@@ -1609,6 +1642,13 @@ async function renderInfo(){
       devCount = d.filter(x => x.kind === 'videoinput').length;
     }
   } catch(e){}
+  infoDevCount = devCount;
+  renderDiag();
+  await renderData();
+}
+// Diagnose: Marker-Werte oben; wird bei offenem Info-Fenster jede Sekunde neu geschrieben
+function renderDiag(){
+  const devCount = infoDevCount;
   let camRow = yn(false);
   let camType = '–';
   if (stream && cam.videoWidth){
@@ -1623,6 +1663,20 @@ async function renderInfo(){
            : wakeLockActive() ? '<span class="ja">aktiv</span>' : '<span class="nein">nicht aktiv</span>';
   const fs = !fsSupported ? '<span class="nein">nicht unterstützt</span>' : (isFs() ? 'an' : 'aus');
   const rows = [
+    ['Erkennungen/s', mkRunning ? '<b>' + fmt1(mkState.fps) + ' /s</b>' + esc(' · ' + fmt1(mkState.ms) + ' ms pro Bild (Mittel)') : esc(!settings.marker.on ? 'aus (Marker aus)' : !settings.marker.color ? 'aus (Farbe nicht angelernt)' : !stream ? 'aus (Kamera aus)' : 'aus')],
+    ['Erkennungsweg (gewählt)', esc(mkMeasure.active ? 'misst … (' + Object.keys(mkMeasure.results).length + '/' + MK_WAYS.length + ')' : mkWay ? mkWay.name : '–')],
+    ['Zeit je Bild', esc(mkRunning ? '(a) holen ' + fmt1(mkState.ta) + ' · (b) lesen ' + fmt1(mkState.tb) + ' · (c) auswerten ' + fmt1(mkState.tc) + ' ms' : '–')],
+    ['Messung der Wege', esc((() => { const p = lsGet(PERF_KEY), R = mkMeasure.active ? mkMeasure.results : (p && p.results) || {};
+        const t = MK_WAYS.filter(w => R[w.id]).map(w => w.name + ': ' + (R[w.id].ok ? fmt1(R[w.id].ms) + ' ms (' + fmt1(R[w.id].a) + '/' + fmt1(R[w.id].b) + '/' + fmt1(R[w.id].c) + ')' : 'nicht nutzbar – ' + R[w.id].note));
+        return t.length ? t.join(' | ') : '–'; })())],
+    ['Verworfen (Fehltreffer)', esc(mkStat.outliers + ' einzelne Punkte · ' + mkStat.rejected + ' ganze Bilder')],
+    ['Vollsuche', esc(mkRunning ? fmt1(mkState.msFull) + ' ms · ' + mkState.blobs + ' Flecken vor Filter' : '–')],
+    ['Fenstersuche', esc(mkRunning ? fmt1(mkState.msWin) + ' ms · Anteil ' + Math.round(mkState.winShare * 100) + ' %' : '–')],
+    ['Verankert', esc(settings.marker.anchor.on ? 'ja · ' + mkState.found.length + '/4' : 'nein')],
+    ['Toleranz / Zittern (verankert)', esc(settings.marker.anchor.on && mkRunning ? fmt1(mkTolNow) + ' px / ' + fmt1(mkNoise) + ' px' : '–')],
+    ['Neu gesetzt (Absicherung)', esc(mkStat.reseeds + '×')],
+    ['Punktgröße (Ø bei 1080 px Breite)', esc(mkRunning && mkDotD ? fmt1(mkDotD) + ' px' + (mkSmall ? ' (klein)' : '') : '–')],
+    ['Punkte-Format', esc((MK_FORMATS[settings.marker.format] || MK_FORMATS['a-hoch'])[0])],
     ['Version', esc(APP_VERSION)],
     ['Sichere Verbindung (https)', yn(window.isSecureContext)],
     ['Kameras am Gerät', esc(devCount)],
@@ -1640,19 +1694,10 @@ async function renderInfo(){
     ['Fokus-Entfernung', esc(typeof focusInfo.dist === 'number' ? focusInfo.dist.toFixed(3) : '–')],
     ['Fokus-Entfernung (Bereich)', esc(focusInfo.caps.focusDistance ? ['min', 'max', 'step'].map(k => k + ' ' + (focusInfo.caps.focusDistance[k] != null ? focusInfo.caps.focusDistance[k] : '–')).join(' · ') : '–')],
     ['Fokus letzter Versuch', esc(focusLog || '–')],
-    ['Marker-Erkennung', esc(mkRunning ? (fmt1(mkState.fps) + ' /s · ' + fmt1(mkState.ms) + ' ms pro Bild (Mittel)') : 'aus')],
-    ['Erkennungsweg', esc(mkMeasure.active ? 'misst … (' + Object.keys(mkMeasure.results).length + '/' + MK_WAYS.length + ')' : mkWay ? mkWay.name : '–')],
-    ['Zeit je Bild', esc(mkRunning ? '(a) holen ' + fmt1(mkState.ta) + ' · (b) lesen ' + fmt1(mkState.tb) + ' · (c) auswerten ' + fmt1(mkState.tc) + ' ms' : '–')],
-    ['Messung der Wege', esc((() => { const p = lsGet(PERF_KEY), R = mkMeasure.active ? mkMeasure.results : (p && p.results) || {};
-        const t = MK_WAYS.filter(w => R[w.id]).map(w => w.name + ': ' + (R[w.id].ok ? fmt1(R[w.id].ms) + ' ms (' + fmt1(R[w.id].a) + '/' + fmt1(R[w.id].b) + '/' + fmt1(R[w.id].c) + ')' : 'nicht nutzbar – ' + R[w.id].note));
-        return t.length ? t.join(' | ') : '–'; })())],
-    ['Verworfen (Fehltreffer)', esc(mkStat.outliers + ' einzelne Punkte · ' + mkStat.rejected + ' ganze Bilder')],
-    ['Vollsuche', esc(mkRunning ? fmt1(mkState.msFull) + ' ms · ' + mkState.blobs + ' Flecken vor Filter' : '–')],
-    ['Fenstersuche', esc(mkRunning ? fmt1(mkState.msWin) + ' ms · Anteil ' + Math.round(mkState.winShare * 100) + ' %' : '–')],
-    ['Verankert', esc(settings.marker.anchor.on ? 'ja' : 'nein')]
   ];
   infoBody.innerHTML = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
-  // Daten
+}
+async function renderData(){
   const rec = await idbGet(PHOTO_KEY);
   const hasPhoto = !!(rec && rec.blob);
   const fmtSize = b => b >= 1048576 ? (b / 1048576).toFixed(1).replace('.', ',') + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
@@ -1667,6 +1712,7 @@ async function renderInfo(){
   dataBody.innerHTML = drows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
   $('photoDelBtn').disabled = !hasPhoto;
 }
+setInterval(() => { if (info.classList.contains('show') && $('diagBox').open) renderDiag(); }, 1000);
 infoBtn.addEventListener('click', async () => { $('infoVer').textContent = 'Version ' + APP_VERSION; await renderInfo(); info.classList.add('show'); });
 $('infoClose').addEventListener('click', () => { info.classList.remove('show'); $('confirmBox').classList.remove('show'); });
 
@@ -2237,9 +2283,10 @@ function mkMeasureFinish(){
   if (ok.length){
     ok.sort((a, b) => R[a.id].ms - R[b.id].ms);
     pick = ok[0];
-    // Worker bevorzugen, wenn fast gleich schnell: rechnet neben dem Hauptprogramm, Bedienung bleibt flüssiger
-    const wk = ok.find(w => w.grab === 'worker');
-    if (wk && R[wk.id].ms <= R[pick.id].ms * 1.25) pick = wk;
+    // Seit 0.11: ImageBitmap (volle Spur) bevorzugen, wenn fast gleich schnell (am Handy klar der schnellste Weg,
+    // gleiche Auflösung und Ausrichtung wie die Anzeige)
+    const bm = ok.find(w => w.id === 'bitmap-voll');
+    if (bm && R[bm.id].ms <= R[pick.id].ms * 1.25) pick = bm;
   }
   mkMeasure.active = false;
   lsSet(PERF_KEY, { key: mkPerfKey(), pick: pick.id, results: R, at: Date.now() });
@@ -2250,24 +2297,36 @@ function mkMeasureFinish(){
 /* ---------- Suchauftrag für das nächste Bild ---------- */
 let mkTracks = [], mkLastFull = 0, mkLost = 0, mkPending = null;
 let mkWinCount = 0, mkFullCount = 0;
-const mkStat = { rejected: 0, outliers: 0 };
+const mkStat = { rejected: 0, outliers: 0, reseeds: 0 };
+const mkDbg = { wins: null, cands: [], found: [] };     // für "Suchfenster zeigen" (Video-Pixel)
+let anchorOkT = 0;          // Zeitpunkt des letzten stimmigen 4/4 im verankerten Zustand
+let anchor3T = 0;           // Zeitpunkt, zu dem zuletzt mindestens 3 Punkte stimmig waren
+// Absicherung nur, wenn länger als 1 s weniger als 3 Punkte stimmig sind. Ist nur EIN Punkt verdeckt (3 stimmig),
+// hält das Foto wie bisher – sonst könnte ein Gegenstand neben dem verdeckten Punkt als neuer Punkt übernommen werden.
+function mkStuck(now){ return anchorOkT && now - anchorOkT > 1000 && now - anchor3T > 1000; }
 function mkReq(){
   const vw = cam.videoWidth || 1, vh = cam.videoHeight || 1, now = performance.now();
-  const base = { minA: 8, wantMask: showMask };
+  // Mindestfläche 2 Rasterpunkte (seit 0.11, vorher 8): ein Punkt mit 8 px Ø bei 1080 px Breite ist im
+  // 320er-Raster nur ca. 2,4 Rasterpunkte breit (Fläche oft nur 2–4) und fiel vorher immer wieder heraus.
+  const base = { minA: 2, wantMask: showMask };
   const A = settings.marker.anchor;
   let wins = null;
   if (A.on && A.ref){
-    // verankert: nur in Fenstern um die vorhergesagten Lagen suchen, nie im ganzen Bild
-    wins = mkAnchorPred().map(p => ({ x: p.x, y: p.y, half: Math.min(0.3 * Math.max(vw, vh), p.half * (1 + 0.25 * Math.min(mkLost, 30))) }));
+    // verankert: nur in Fenstern um die vorhergesagten Lagen suchen. Absicherung: länger als 1 s kein
+    // stimmiges 4/4 -> alle 300 ms eine Vollsuche (damit Punktgrößen und Fenster neu gesetzt werden können)
+    if (mkStuck(now) && now - mkLastFull > 300) wins = null;
+    else wins = mkAnchorPred().map(p => ({ x: p.x, y: p.y, half: Math.min(0.3 * Math.max(vw, vh), p.half * (1 + 0.25 * Math.min(mkLost, 30))) }));
   } else {
     const full = !mkTracks.length || (mkTracks.length < 4 && now - mkLastFull > 300) || now - mkLastFull > 1000;
     if (!full) wins = mkTracks.map(t => ({ x: t.x + t.vx, y: t.y + t.vy, half: Math.max(4 * t.r, 40 * vw / 1280) + 1.5 * Math.hypot(t.vx, t.vy) }));
   }
+  mkDbg.wins = wins;
   return Object.assign(base, { rects: wins ? wins.map(w => [(w.x - w.half) / vw, (w.y - w.half) / vh, (w.x + w.half) / vw, (w.y + w.half) / vh]) : null, wins });
 }
 
 /* ---------- Ergebnis verarbeiten: Zuordnen, Prüfen, Glätten, Verankern ---------- */
 let mkSm = {};      // Glättung je Nummer (One-Euro-Filter)
+let mkDotD = 0, mkSmall = false, dbgWin = false;
 function mkHandleResult(res, t){
   if (!mkRunning) return;
   const vw = cam.videoWidth, vh = cam.videoHeight;
@@ -2278,8 +2337,13 @@ function mkHandleResult(res, t){
   const A = settings.marker.anchor;
   let found;
   if (A.on && A.ref){
+    if (t.full) mkLastFull = performance.now();
     found = mkAssign(cands, mkAnchorPred(), true);
     found = mkPlausible(found);
+    if (found.length < 4 && t.full && mkStuck(performance.now())){
+      const rs = mkReseed(cands);
+      if (rs) found = mkAccept(rs);
+    }
   } else if (t.full){
     mkLastFull = performance.now();
     found = orderMarkers(cands.sort((a, b) => b.r - a.r).slice(0, 4));
@@ -2314,6 +2378,14 @@ function mkHandleResult(res, t){
     mkCount = 0; mkWinCount = 0; mkFullCount = 0; mkCountT = now;
   }
   mkLastRes = now;
+  // Punktgröße für den Hinweis "Punkte größer malen" (Durchmesser umgerechnet auf 1080 px Breite)
+  if (found.length){
+    const rr = found.map(f => f.r).sort((p, q) => p - q), d = 2 * rr[rr.length >> 1] * 1080 / vw;
+    mkDotD = mkDotD ? mkDotD * 0.9 + d * 0.1 : d;
+    const small = mkSmall ? mkDotD < 11 : mkDotD < 10;
+    if (small !== mkSmall){ mkSmall = small; $('mkHint').classList.toggle('show', small); }
+  }
+  if (dbgWin){ mkDbg.cands = cands; mkDbg.found = found; }
   if (mkMeasure.active) mkMeasureSample(t, res.cands);
   if (A.on) anchorApply();
   if (showMask && res.mask) drawMask(res.mask, t.W, t.H);
@@ -2405,16 +2477,22 @@ function simFit(src, dst){
 // 3) Passt keine Dreiergruppe: Bild verwerfen (Lage halten). Sind mehrere verworfene Bilder untereinander
 //    stimmig (schnelle echte Bewegung), wird nach 4 Bildern neu übernommen.
 // 4) Großer Sprung oder starke Größenänderung: erst übernehmen, wenn das nächste Bild ihn bestätigt.
-let mkSeen = {}, mkRejectRun = 0, mkRejectPrev = null;
+// 0.11: Toleranz = Anteil der Viereckgröße + Grundwert + 2 Rasterpunkte (Schwerpunkt eines kleinen Flecks
+// springt im 320er-Raster leicht um einen Rasterpunkt); zusätzlich mindestens 4× das gemessene Zittern,
+// höchstens 3 % der Viereckgröße. Zähler je Punkt: stimmig +1 (bis 6), unstimmig −2, fehlt −1;
+// ganz verworfene Bilder ändern die Zähler nicht.
+let mkSeen = {}, mkRejectRun = 0, mkRejectPrev = null, mkNoise = 0, mkTolNow = 0;
 function mkPlausible(found){
-  const vw = cam.videoWidth, k = vw / 1280;
+  const vw = cam.videoWidth, k = vw / 1280, gp = vw / 320;
   if (!anchorAcc){                                   // erste Erkennung nach Neustart
     if (found.length === 4){ for (let l = 1; l <= 4; l++) mkSeen[l] = 3; return mkAccept(found); }
     return found;
   }
   const last = [1, 2, 3, 4].map(l => anchorAcc[l]);
   const size = quadPerim(last.map(p => [p.x, p.y])) / 4;
-  const tol = 0.006 * size + 2 * k;
+  const tolBase = 0.006 * size + 2 * k + 2 * gp;
+  const tol = Math.min(Math.max(tolBase, 4 * mkNoise), Math.max(tolBase, 0.03 * size));
+  mkTolNow = tol;
   const pres = found.map(f => ({ f, L: [anchorAcc[f.label].x, anchorAcc[f.label].y], C: [f.x, f.y] }));
   // beste Dreiergruppe (bzw. alle 3, wenn nur 3 da sind)
   let inl = null, fitBest = Infinity;
@@ -2423,12 +2501,19 @@ function mkPlausible(found){
     const sf = simFit(g.map(i => pres[i].L), g.map(i => pres[i].C));
     if (sf && sf.res < fitBest){ fitBest = sf.res; inl = sf; }
   }
+  if (pres.length === 4 && inl){ const r = Math.min(fitBest, 0.03 * size); mkNoise = mkNoise ? mkNoise * 0.9 + r * 0.1 : r; }
   const consistent = new Set();
   if (inl && fitBest <= tol){
     for (const p of pres){ const q = inl.f(p.L[0], p.L[1]); if (Math.hypot(q[0] - p.C[0], q[1] - p.C[1]) <= tol) consistent.add(p.f.label); }
   }
-  for (let l = 1; l <= 4; l++) mkSeen[l] = consistent.has(l) ? (mkSeen[l] || 0) + 1 : 0;
+  if (!(pres.length === 4 && consistent.size < 3)){
+    for (let l = 1; l <= 4; l++){
+      const s0 = mkSeen[l] || 0;
+      mkSeen[l] = consistent.has(l) ? Math.min(6, s0 + 1) : found.some(f => f.label === l) ? Math.max(0, s0 - 2) : Math.max(0, s0 - 1);
+    }
+  }
   const usable = found.filter(f => consistent.has(f.label) && mkSeen[f.label] >= 3);
+  if (usable.length >= 3) anchor3T = performance.now();
   if (pres.length === 4 && consistent.size === 3) mkStat.outliers++;
   if (pres.length === 4 && consistent.size < 3){
     // keine stimmige Dreiergruppe: schnelle echte Bewegung oder Fehltreffer
@@ -2474,7 +2559,38 @@ function mkAccept(found){
   const acc = {};
   for (const f of found) acc[f.label] = { x: f.x, y: f.y };
   anchorPrevAcc = anchorAcc; anchorAcc = acc;
+  if (found.length === 4) anchorOkT = anchor3T = performance.now();
   return found;
+}
+// Absicherung (0.11): Vollsuche findet 4 passende Punkte in der Nähe der letzten Lage -> Punktgrößen,
+// Größenbezug, Vorhersage und Zähler neu setzen (statt dauerhaft zu halten). Die Referenz bleibt.
+function mkReseed(cands){
+  const A = settings.marker.anchor, vw = cam.videoWidth, vh = cam.videoHeight;
+  if (cands.length < 4 || !A.ref) return null;
+  const pred = mkAnchorPred();
+  const ref = [1, 2, 3, 4].map(l => anchorAcc && anchorAcc[l] ? anchorAcc[l] : pred[l - 1]);
+  const size = quadPerim(ref.map(p => [p.x, p.y])) / 4;
+  const used = new Set(), pick = [];
+  for (let i = 0; i < 4; i++){
+    let best = null, bd = 0.25 * size;
+    for (const c of cands){ if (used.has(c)) continue; const d = Math.hypot(c.x - ref[i].x, c.y - ref[i].y); if (d < bd){ bd = d; best = c; } }
+    if (!best) return null;
+    used.add(best); pick.push(Object.assign({}, best, { label: i + 1 }));
+  }
+  const rs = pick.map(f => f.r);
+  if (Math.max(...rs) > 2.5 * Math.min(...rs)) return null;          // sehr unterschiedlich groß: eher Fehltreffer
+  if (!quadValid(pick.map(f => [f.x, f.y]))) return null;
+  const cur = pick.map(f => [f.x / vw, f.y / vh]);
+  const H = solveHomography(A.ref, cur);
+  if (!H) return null;
+  anchorH = H;
+  A.r = pick.map(f => f.r / vw);
+  A.rPerim = quadPerim(cur.map(p => [p[0], p[1] * vh / vw]));
+  mkSm = {}; mkPending = null; mkRejectRun = 0; mkRejectPrev = null; mkNoise = 0;
+  for (let l = 1; l <= 4; l++) mkSeen[l] = 3;
+  anchorAcc = anchorPrevAcc = null;
+  mkStat.reseeds++;
+  return pick;
 }
 // One-Euro-Filter: im Stillstand stark glätten, bei Bewegung schnell folgen
 function mkSmooth(f, k){
@@ -2575,6 +2691,58 @@ function applyAnchorBtn(){
   b.setAttribute('aria-pressed', A.on);
   b.classList.toggle('dim', !A.on && !can);
   $('mkAnchorLbl').textContent = A.on ? 'Lösen' : 'Verankern';
+  $('mkRefit').classList.toggle('dim', !can);
+  $('mkFmtLbl').textContent = (MK_FORMATS[settings.marker.format] || MK_FORMATS['a-hoch'])[0];
+}
+/* ---------- Automatisch einpassen (0.11) ----------
+   Punkte-Viereck auf dem Papier = Rechteck im gewählten Seitenverhältnis. Homographie G: dieses Rechteck ->
+   Lage der 4 Punkte im Kamerabild. Das Foto wird mit SEINEM Seitenverhältnis so groß wie möglich mittig in
+   das Rechteck gelegt und mit G abgebildet -> auf dem Papier unverzerrt, im Kamerabild perspektivisch passend. */
+function mkPaperAspect(cur){
+  const fm = MK_FORMATS[settings.marker.format] || MK_FORMATS['a-hoch'];
+  if (fm[1]) return fm[1];
+  // "Wie im Bild": mittlere Breite / mittlere Höhe im Kamerabild (nur bei fast senkrechter Kamera genau)
+  const vw = cam.videoWidth || 1, vh = cam.videoHeight || 1, p = cur.map(c => [c[0] * vw, c[1] * vh]);
+  const d = (a, b) => Math.hypot(p[a][0] - p[b][0], p[a][1] - p[b][1]);
+  return Math.min(10, Math.max(0.1, (d(0, 1) + d(3, 2)) / Math.max(1e-6, d(0, 3) + d(1, 2))));
+}
+function autoFit(cur){
+  if (!P.w || !cur) return false;
+  const Wp = mkPaperAspect(cur), Hp = 1;
+  const G = solveHomography([[0, 0], [Wp, 0], [Wp, Hp], [0, Hp]], cur);
+  if (!G) return false;
+  const F = photoFrame(), a = F.aw / F.ah;
+  let pw, ph;
+  if (a > Wp / Hp){ pw = Wp; ph = Wp / a; } else { ph = Hp; pw = Hp * a; }
+  const x0 = (Wp - pw) / 2, y0 = (Hp - ph) / 2;
+  const Qn = [[x0, y0], [x0 + pw, y0], [x0 + pw, y0 + ph], [x0, y0 + ph]].map(([x, y]) => { const q = m3apply(G, x, y); return q ? [q.x, q.y] : null; });
+  if (Qn.some(q => !q)) return false;
+  // Grundlage (Mitte, Drehung, Größe) grob auf das Viereck legen, die Perspektive kommt über die Ecken
+  const Pp = Qn.map(([x, y]) => [x * P.w, y * P.h]);
+  const cx = (Pp[0][0] + Pp[1][0] + Pp[2][0] + Pp[3][0]) / 4, cy = (Pp[0][1] + Pp[1][1] + Pp[2][1] + Pp[3][1]) / 4;
+  const ang = Math.atan2(Pp[1][1] - Pp[0][1] + Pp[2][1] - Pp[3][1], Pp[1][0] - Pp[0][0] + Pp[2][0] - Pp[3][0]);
+  const wpx = (Math.hypot(Pp[1][0] - Pp[0][0], Pp[1][1] - Pp[0][1]) + Math.hypot(Pp[2][0] - Pp[3][0], Pp[2][1] - Pp[3][1])) / 2;
+  const p = settings.photo, old = { x: p.x, y: p.y, scale: p.scale, rotation: p.rotation, corners: p.corners.map(c => c.slice()) };
+  p.x = (cx - P.w / 2) / P.w; p.y = (cy - P.h / 2) / P.h; p.rotation = ang * 180 / Math.PI;
+  p.scale = Math.min(PHOTO_MAX, Math.max(PHOTO_MIN, wpx / (F.aw * F.s0)));
+  p.corners = [[0, 0], [0, 0], [0, 0], [0, 0]];
+  if (!setPhotoQuadNorm(Qn)){ Object.assign(p, old); applyPhotoTransform(); return false; }
+  return true;
+}
+// Verankerung mit der aktuellen Lage beginnen (Referenz = geglättete Lage, Vergleich = ungeglättete Lage)
+function anchorStart(cur){
+  const A = settings.marker.anchor, vw = cam.videoWidth, vh = cam.videoHeight;
+  A.on = true; A.ref = cur.map(c => c.slice()); A.quad = photoQuadNorm(); anchorLast = cur; anchorH = ID3; mkPending = null;
+  // Größe der 4 Punkte merken (gegen Fehltreffer), bezogen auf die Größe des Marker-Vierecks
+  A.r = [1, 2, 3, 4].map(l => (mkState.found.find(f => f.label === l) || { r: 0 }).r / vw);
+  A.rPerim = quadPerim(cur.map(p => [p[0], p[1] * vh / vw]));
+  const raw = mkTracks.length === 4 ? mkTracks : mkState.found;
+  anchorAcc = {}; anchorPrevAcc = null;
+  for (const f of raw) anchorAcc[f.label] = { x: f.x, y: f.y };
+  // Fehlerursache 0.10: Zähler standen nach dem Tippen auf 0 -> "0/4 · gehalten", bis 3 stimmige Bilder
+  // hintereinander kamen (bei kleinen, zitternden Punkten fast nie). Alle 4 waren gerade sichtbar: sofort gültig.
+  for (let l = 1; l <= 4; l++) mkSeen[l] = 3;
+  mkRejectRun = 0; mkRejectPrev = null; mkNoise = 0; anchorOkT = anchor3T = performance.now();
 }
 $('mkAnchor').addEventListener('click', () => {
   const A = settings.marker.anchor;
@@ -2584,16 +2752,25 @@ $('mkAnchor').addEventListener('click', () => {
   } else {
     const cur = mkRunning ? markersNorm() : null;
     if (!cur){ showToast('Verankern geht nur bei 4/4 Markern'); return; }
-    A.on = true; A.ref = cur; A.quad = photoQuadNorm(); anchorLast = cur; anchorH = ID3; mkPending = null;
-    // Größe der 4 Punkte merken (gegen Fehltreffer), bezogen auf die Größe des Marker-Vierecks
-    const vw = cam.videoWidth, vh = cam.videoHeight;
-    A.r = [1, 2, 3, 4].map(l => (mkState.found.find(f => f.label === l) || { r: 0 }).r / vw);
-    A.rPerim = quadPerim(cur.map(p => [p[0], p[1] * vh / vw]));
-    anchorAcc = {}; anchorPrevAcc = null;
-    for (const f of mkState.found) anchorAcc[f.label] = { x: f.x, y: f.y };
-    showToast('Verankert');
+    const fitted = autoFit(cur);                // Foto automatisch in das Punkte-Viereck einpassen
+    anchorStart(cur);
+    showToast(fitted ? 'Eingepasst und verankert' : 'Verankert (Einpassen nicht möglich)');
   }
   applyLinesPanel(); applyMarkerChip(); scheduleSave();
+});
+$('mkRefit').addEventListener('click', () => {
+  const cur = mkRunning ? markersNorm() : null;
+  if (!cur){ showToast('Neu einpassen geht nur bei 4/4 Markern'); return; }
+  if (!autoFit(cur)){ showToast('Einpassen nicht möglich – Punkte prüfen'); return; }
+  const A = settings.marker.anchor;
+  if (A.on){ A.ref = cur.map(c => c.slice()); A.quad = photoQuadNorm(); anchorLast = cur; anchorH = ID3; }
+  showToast('Neu eingepasst');
+  applyLinesPanel(); scheduleSave();
+});
+$('mkFmt').addEventListener('click', () => {
+  const i = MK_FORMAT_ORDER.indexOf(settings.marker.format);
+  settings.marker.format = MK_FORMAT_ORDER[(i + 1) % MK_FORMAT_ORDER.length];
+  applyLinesPanel(); scheduleSave();
 });
 
 // Feste Reihenfolge: 1 oben links, 2 oben rechts, 3 unten rechts, 4 unten links
@@ -2654,7 +2831,31 @@ function markerDraw(){
     mNums[i].setAttribute('x', x + r * 0.75 + 2); mNums[i].setAttribute('y', y - r * 0.75 - 2);
     mNums[i].textContent = m.label;
   }
+  drawDbg();
 }
+// "Suchfenster zeigen" (Diagnose, nicht gespeichert): Fenster gestrichelt, Flecken grün (angenommen) / rot (verworfen)
+const mkDbgG = $('mkDbgG');
+function drawDbg(){
+  if (!dbgWin || !mkRunning || !cam.videoWidth){ if (mkDbgG.firstChild) mkDbgG.innerHTML = ''; return; }
+  const f = P.w / cam.videoWidth, X = x => V.tx + V.s * (P.left + x * f), Y = y => V.ty + V.s * (P.top + y * f);
+  let h = '';
+  for (const w of mkDbg.wins || []){
+    const x0 = X(w.x - w.half), y0 = Y(w.y - w.half), sz = 2 * w.half * f * V.s;
+    h += '<rect class="dw" x="' + x0.toFixed(1) + '" y="' + y0.toFixed(1) + '" width="' + sz.toFixed(1) + '" height="' + sz.toFixed(1) + '"/>';
+  }
+  for (const c of mkDbg.cands){
+    const ok = mkDbg.found.some(q => q.x === c.x && q.y === c.y);
+    h += '<circle class="' + (ok ? 'dok' : 'dbad') + '" cx="' + X(c.x).toFixed(1) + '" cy="' + Y(c.y).toFixed(1) + '" r="' + (ok ? 2.5 : 4) + '"/>';
+  }
+  mkDbgG.innerHTML = h;
+}
+$('dbgWinBtn').addEventListener('click', () => {
+  dbgWin = !dbgWin;
+  $('dbgWinBtn').textContent = 'Suchfenster zeigen: ' + (dbgWin ? 'an' : 'aus');
+  $('dbgWinBtn').setAttribute('aria-pressed', dbgWin);
+  if (!dbgWin){ mkDbg.cands = []; mkDbg.found = []; }
+  drawDbg();
+});
 function applyMarkerChip(){
   const on = settings.marker.on;
   markerChip.classList.toggle('show', on);
@@ -2670,7 +2871,9 @@ function applyMarkerChip(){
 function mkWanted(){ return settings.marker.on && !!settings.marker.color && !!stream && !document.hidden; }
 function mkResetTracking(){
   mkState.found = []; mkState.prev = null; mkTracks = []; mkSm = {}; mkLastFull = 0; mkLost = 0; mkPending = null;
-  anchorAcc = anchorPrevAcc = null; anchorH = null; mkSeen = {}; mkRejectRun = 0; mkRejectPrev = null;
+  anchorAcc = anchorPrevAcc = null; anchorH = null; mkSeen = {}; mkRejectRun = 0; mkRejectPrev = null; mkNoise = 0;
+  anchorOkT = anchor3T = performance.now();     // Absicherung greift auch nach Neustart (z. B. Papier inzwischen verschoben)
+  mkDotD = 0;
 }
 function mkUpdateLoop(){
   if (mkWanted()){
